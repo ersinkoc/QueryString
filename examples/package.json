@@ -1,0 +1,21 @@
+{
+  "name": "@oxog/querystring-examples",
+  "version": "1.0.0",
+  "description": "Examples for @oxog/querystring",
+  "private": true,
+  "scripts": {
+    "basic": "node basic-usage/index.js",
+    "advanced": "node advanced-usage/index.js",
+    "typescript": "ts-node typescript-usage/index.ts",
+    "plugin": "node plugin-example/custom-plugin.js",
+    "migrate-qs": "node migration/from-qs.js",
+    "migrate-query-string": "node migration/from-query-string.js"
+  },
+  "dependencies": {
+    "@oxog/querystring": "file:.."
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}

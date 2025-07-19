@@ -1,0 +1,17 @@
+src/
+tests/
+examples/
+benchmarks/
+docs/
+.eslintrc.js
+.prettierrc
+jest.config.js
+tsconfig.json
+*.tsbuildinfo
+coverage/
+.nyc_output/
+*.log
+.DS_Store
+node_modules/
+.vscode/
+.idea/

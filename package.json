@@ -1,0 +1,62 @@
+{
+  "name": "@oxog/querystring",
+  "version": "1.0.0",
+  "description": "High-performance, type-safe query string parser and stringifier with zero dependencies",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "npm run build:cjs && npm run build:esm",
+    "build:cjs": "tsc",
+    "build:esm": "tsc --module esnext --outDir dist/esm --target es2020 && node -e \"const fs=require('fs'); const path=require('path'); function renameJsToMjs(dir) { const files=fs.readdirSync(dir); files.forEach(file => { const fullPath=path.join(dir,file); if(fs.statSync(fullPath).isDirectory()) { renameJsToMjs(fullPath); } else if(file.endsWith('.js')) { const mjsPath=fullPath.replace('.js','.mjs'); fs.renameSync(fullPath,mjsPath); } }); } renameJsToMjs('dist/esm'); fs.writeFileSync('dist/index.mjs', fs.readFileSync('dist/esm/index.mjs')); console.log('ESM build complete');\"",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "benchmark": "node benchmarks/performance.js",
+    "prepublishOnly": "npm run build && npm test",
+    "publish:check": "node scripts/pre-publish-check.js",
+    "publish:npm": "node scripts/publish.js",
+    "publish:bump": "node scripts/publish.js --bump"
+  },
+  "keywords": [
+    "querystring",
+    "query",
+    "string",
+    "parse",
+    "stringify",
+    "url",
+    "qs",
+    "typescript",
+    "zero-dependency"
+  ],
+  "author": "Ersin Koc",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/jest": "^29.0.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "jest": "^29.0.0",
+    "prettier": "^3.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
