@@ -93,9 +93,19 @@ async function publish() {
     // Add tag option
     const tag = await question('\n🏷️  Publish with tag (leave empty for latest): ');
     
+    // Check if scoped package
+    const isScoped = packageJson.name.startsWith('@');
+    let accessFlag = '';
+    
+    if (isScoped) {
+      const accessType = await question('\n🔓 Access level for scoped package (public/restricted) [public]: ');
+      accessFlag = `--access ${accessType || 'public'}`;
+    }
+    
     // Publish
     console.log('\n📤 Publishing to npm...');
-    const publishCmd = tag ? `npm publish --tag ${tag}` : 'npm publish';
+    const publishCmd = `npm publish ${accessFlag} ${tag ? `--tag ${tag}` : ''}`.trim();
+    console.log(`Running: ${publishCmd}`);
     execSync(publishCmd, { stdio: 'inherit' });
 
     console.log('\n✅ Successfully published!');
