@@ -48,7 +48,6 @@ export function parse(input: string, options?: ParseOptions): ParsedQuery {
     plainObjects,
     allowPrototypes,
     strictNullHandling,
-    comma,
     ignoreQueryPrefix,
     duplicates,
     parseNumbers,
@@ -113,10 +112,6 @@ export function parse(input: string, options?: ParseOptions): ParsedQuery {
 
     if (shouldInterpretNumericEntities && charset === 'iso-8859-1') {
       val = interpretNumericEntities(val);
-    }
-
-    if (comma && val.indexOf(',') > -1) {
-      val = val.split(',').join(',');
     }
 
     let parsedValue: QueryValue = val;

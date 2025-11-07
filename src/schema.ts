@@ -526,7 +526,9 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
   }
 
   strip(): this {
-    // this._strip = true; // Property was commented out earlier
+    // Strip mode is the default behavior - just ensure other modes are disabled
+    this._strict = false;
+    this._passthrough = false;
     return this;
   }
 

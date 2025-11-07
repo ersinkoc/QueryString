@@ -187,12 +187,8 @@ function stringifyObject(
       continue;
     }
 
-    if (skipNulls && (value === null || value === undefined)) {
-      continue;
-    }
-
     if (isValidDate(value)) {
-      const encodedKey = encodeValuesOnly ? fullKey : encoder(fullKey);
+      const encodedKey = encodeValuesOnly ? fullKey : keyEncoder(fullKey);
       const serialized = serializeDate(value);
       pairs.push(`${encodedKey}=${encoder(serialized)}`);
       continue;
