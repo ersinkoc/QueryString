@@ -433,6 +433,30 @@ describe('Schema Validation', () => {
       expect(schema).toBeDefined();
       expect(schema.parse({})).toEqual({});
     });
+
+    it('should strip unknown keys by default', () => {
+      const schema = q.object().shape({
+        name: q.string()
+      });
+
+      expect(schema.parse({ name: 'John', extra: 'field' })).toEqual({ name: 'John' });
+    });
+
+    it('should override passthrough when strip is called', () => {
+      const schema = q.object().shape({
+        name: q.string()
+      }).passthrough().strip();
+
+      expect(schema.parse({ name: 'John', extra: 'field' })).toEqual({ name: 'John' });
+    });
+
+    it('should override strict when strip is called', () => {
+      const schema = q.object().shape({
+        name: q.string()
+      }).strict().strip();
+
+      expect(schema.parse({ name: 'John', extra: 'field' })).toEqual({ name: 'John' });
+    });
   });
 
   describe('enum schema', () => {

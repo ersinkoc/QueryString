@@ -158,18 +158,6 @@ export function hasPrototypePollution(obj: unknown): boolean {
         return true;
       }
     }
-    
-    // Also check enumerable properties
-    for (const key in obj) {
-      if (hasOwn(obj, key)) {
-        if (dangerousKeys.includes(key)) {
-          return true;
-        }
-        if (hasPrototypePollution((obj as Record<string, unknown>)[key])) {
-          return true;
-        }
-      }
-    }
   }
 
   return false;
