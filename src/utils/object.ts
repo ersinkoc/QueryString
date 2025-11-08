@@ -137,7 +137,7 @@ export function unflattenObject(obj: Record<string, unknown>, allowDots = false)
 
   for (const key in obj) {
     if (hasOwn(obj, key)) {
-      const keys = allowDots ? key.split('.') : key.split(/[\[\]]+/).filter(Boolean);
+      const keys = allowDots ? key.split('.') : key.split(/[[\]]+/).filter(Boolean);
       let current: Record<string, unknown> = result;
 
       for (let i = 0; i < keys.length - 1; i++) {

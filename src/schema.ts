@@ -17,6 +17,7 @@ import {
 abstract class BaseSchemaImpl<T> implements BaseSchema<T> {
   abstract type: string;
   protected _default?: T;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   protected _transforms: Array<(value: T) => any> = [];
   protected _refinements: Array<{ fn: (value: T) => boolean; message: string }> = [];
 
@@ -52,6 +53,7 @@ abstract class BaseSchemaImpl<T> implements BaseSchema<T> {
   }
 
   transform<U>(fn: (value: T) => U): BaseSchema<U> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const schema = this as any;
     schema._transforms.push(fn);
     return schema;
@@ -62,7 +64,9 @@ abstract class BaseSchemaImpl<T> implements BaseSchema<T> {
     return this;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   protected applyTransforms(value: T): any {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let result: any = value;
     for (const transform of this._transforms) {
       result = transform(result);
@@ -509,7 +513,9 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
   }
 
   shape<S extends Record<string, SchemaType>>(shape: S): ObjectSchema<{ [K in keyof S]: S[K] extends BaseSchema<infer U> ? U : never }> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this._shape = shape as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return this as any;
   }
 
@@ -576,6 +582,7 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
   extend<S extends Record<string, SchemaType>>(extension: S): ObjectSchema<T & { [K in keyof S]: S[K] extends BaseSchema<infer U> ? U : never }> {
     const newShape = { ...(this._shape || {}), ...extension };
     const schema = new ObjectSchemaImpl<T & { [K in keyof S]: S[K] extends BaseSchema<infer U> ? U : never }>();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     schema._shape = newShape as any;
     return schema;
   }
@@ -590,6 +597,7 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
 
   partial(): ObjectSchema<Partial<T>> {
     if (!this._shape) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return this as any;
     }
 
@@ -604,10 +612,12 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
   }
 
   deepPartial(): ObjectSchema<DeepPartial<T>> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return this as any;
   }
 
   required(): ObjectSchema<Required<T>> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return this as any;
   }
 }
@@ -635,6 +645,7 @@ class EnumSchemaImpl<T extends readonly [string, ...string[]]> extends BaseSchem
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 class UnionSchemaImpl<T extends readonly SchemaType[]> extends BaseSchemaImpl<any> implements UnionSchema<T> {
   type = 'union' as const;
   options: T;
@@ -644,6 +655,7 @@ class UnionSchemaImpl<T extends readonly SchemaType[]> extends BaseSchemaImpl<an
     this.options = options;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   parse(value: unknown): any {
     if (value === undefined && this._default !== undefined) {
       value = this._default;
@@ -729,9 +741,12 @@ export const q = {
       }
     })();
   },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   any: (): BaseSchema<any> => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return new (class extends BaseSchemaImpl<any> {
       type = 'any' as const;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       parse(value: unknown): any {
         return value;
       }

@@ -1,4 +1,4 @@
-import { SecurityOptions, ParsedQuery } from './types';
+import { SecurityOptions, ParsedQuery, ParseOptions } from './types';
 import { getDepth, hasOwn } from './utils/object';
 
 const XSS_PATTERNS = [
@@ -247,9 +247,12 @@ function sanitizeObjectData(obj: unknown): unknown {
 }
 
 
-export function createSecureParser(baseParser: Function, securityOptions: SecurityOptions = {}) {
-  return function secureParser(input: string, options?: unknown): ParsedQuery {
-    let result = baseParser(input, options) as ParsedQuery;
+export function createSecureParser(
+  baseParser: (input: string, options?: ParseOptions) => ParsedQuery,
+  securityOptions: SecurityOptions = {}
+): (input: string, options?: ParseOptions) => ParsedQuery {
+  return function secureParser(input: string, options?: ParseOptions): ParsedQuery {
+    let result = baseParser(input, options);
     
     if (securityOptions.sanitize) {
       result = sanitizeObjectData(result) as ParsedQuery;

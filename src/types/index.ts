@@ -102,16 +102,22 @@ export interface SchemaValidationResult<T> {
   }>;
 }
 
-export type SchemaType = 
+export type SchemaType =
   | StringSchema
   | NumberSchema
   | BooleanSchema
   | DateSchema
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | ArraySchema<any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | ObjectSchema<any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | EnumSchema<any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | UnionSchema<any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | OptionalSchema<any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | NullableSchema<any>;
 
 export interface BaseSchema<T = unknown> {

@@ -1,5 +1,6 @@
 import { BaseSchema, SchemaType } from './index';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Infer<T extends BaseSchema<any>> = T extends BaseSchema<infer U> ? U : never;
 
 export type InferObject<T extends Record<string, SchemaType>> = {

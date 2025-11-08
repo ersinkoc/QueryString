@@ -75,18 +75,18 @@ export function stringify(obj: unknown, options?: StringifyOptions): string {
     strictNullHandling,
     skipNulls,
     encode: shouldEncode,
-    encoder: shouldEncode ? (str: string) => {
+    encoder: shouldEncode ? (str: string): string => {
       if (typeof encoder === 'function') {
-        return encoder(str, (s: string) => encode(s, format), charset);
+        return encoder(str, (s: string): string => encode(s, format), charset);
       }
       return encode(str, format);
-    } : (str: string) => str,
-    keyEncoder: shouldEncode ? (str: string) => {
+    } : (str: string): string => str,
+    keyEncoder: shouldEncode ? (str: string): string => {
       if (typeof encoder === 'function') {
-        return encoder(str, (s: string) => encode(s, format, true), charset);
+        return encoder(str, (s: string): string => encode(s, format, true), charset);
       }
       return encode(str, format, true);
-    } : (str: string) => str,
+    } : (str: string): string => str,
     arrayFormat,
     arrayFormatSeparator,
     serializeDate,
@@ -98,8 +98,8 @@ export function stringify(obj: unknown, options?: StringifyOptions): string {
   });
 
   if (sort) {
-    const sorter = typeof sort === 'function' ? sort : (a: string, b: string) => a.localeCompare(b);
-    pairs.sort((a, b) => {
+    const sorter = typeof sort === 'function' ? sort : (a: string, b: string): number => a.localeCompare(b);
+    pairs.sort((a, b): number => {
       const aKey = a.split('=')[0];
       const bKey = b.split('=')[0];
       return sorter(aKey, bKey);

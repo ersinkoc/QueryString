@@ -240,7 +240,7 @@ export class QueryBuilder {
 
   unless(condition: boolean | ((builder: QueryBuilder) => boolean), callback: (builder: QueryBuilder) => void): this {
     return this.when(
-      typeof condition === 'function' ? (builder) => !condition(builder) : !condition,
+      typeof condition === 'function' ? (builder): boolean => !condition(builder) : !condition,
       callback
     );
   }

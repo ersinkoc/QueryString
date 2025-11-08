@@ -1,4 +1,4 @@
-import { ArrayFormat, QueryValue } from '../types';
+import { ArrayFormat, QueryValue, Primitive } from '../types';
 
 export function joinArrayFormat(
   key: string,
@@ -113,14 +113,14 @@ export function combineArrayValues(existing: QueryValue, newValue: QueryValue): 
     if (Array.isArray(newValue)) {
       return existing.concat(newValue);
     }
-    return existing.concat([newValue as any]);
+    return existing.concat([newValue as Primitive]);
   }
 
   if (Array.isArray(newValue)) {
-    return [existing as any].concat(newValue as any[]);
+    return [existing as Primitive].concat(newValue as Primitive[]);
   }
 
-  return [existing as any, newValue as any];
+  return [existing as Primitive, newValue as Primitive];
 }
 
 export function ensureArray<T>(value: T | T[]): T[] {
