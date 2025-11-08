@@ -1,5 +1,13 @@
 import { QueryStringPlugin, ParseOptions, StringifyOptions, ParsedQuery } from './types';
 
+interface GlobalWithEncoding {
+  btoa?: (str: string) => string;
+  atob?: (str: string) => string;
+  Buffer?: {
+    from(str: string, encoding?: string): { toString(encoding?: string): string };
+  };
+}
+
 export class PluginManager {
   private plugins: Map<string, QueryStringPlugin> = new Map();
 
@@ -38,49 +46,49 @@ export class PluginManager {
 
   applyBeforeParse(input: string, options: ParseOptions): string {
     let result = input;
-    
-    for (const [_, plugin] of this.plugins) {
+
+    for (const plugin of this.plugins.values()) {
       if (plugin.beforeParse) {
         result = plugin.beforeParse(result, options);
       }
     }
-    
+
     return result;
   }
 
   applyAfterParse(result: ParsedQuery, options: ParseOptions): ParsedQuery {
     let output = result;
-    
-    for (const [_, plugin] of this.plugins) {
+
+    for (const plugin of this.plugins.values()) {
       if (plugin.afterParse) {
         output = plugin.afterParse(output, options);
       }
     }
-    
+
     return output;
   }
 
   applyBeforeStringify(obj: ParsedQuery, options: StringifyOptions): ParsedQuery {
     let result = obj;
-    
-    for (const [_, plugin] of this.plugins) {
+
+    for (const plugin of this.plugins.values()) {
       if (plugin.beforeStringify) {
         result = plugin.beforeStringify(result, options);
       }
     }
-    
+
     return result;
   }
 
   applyAfterStringify(result: string, options: StringifyOptions): string {
     let output = result;
-    
-    for (const [_, plugin] of this.plugins) {
+
+    for (const plugin of this.plugins.values()) {
       if (plugin.afterStringify) {
         output = plugin.afterStringify(output, options);
       }
     }
-    
+
     return output;
   }
 
@@ -166,7 +174,7 @@ export const filterEmptyPlugin = createPlugin({
 export const base64Plugin = createPlugin({
   name: 'base64',
   afterStringify: (result: string): string => {
-    const globalObj = globalThis as any;
+    const globalObj = globalThis as unknown as GlobalWithEncoding;
     if (typeof globalObj.btoa === 'function') {
       return globalObj.btoa(result);
     }
@@ -175,12 +183,12 @@ export const base64Plugin = createPlugin({
   },
   beforeParse: (input: string): string => {
     try {
-      const globalObj = globalThis as any;
+      const globalObj = globalThis as unknown as GlobalWithEncoding;
       if (typeof globalObj.atob === 'function') {
         // Browser environment
         const decoded = globalObj.atob(input);
-        const reencoded = globalObj.btoa(decoded);
-        if (reencoded.replace(/=+$/, '') === input.replace(/=+$/, '')) {
+        const reencoded = globalObj.btoa?.(decoded);
+        if (reencoded && reencoded.replace(/=+$/, '') === input.replace(/=+$/, '')) {
           return decoded;
         }
         return input;
@@ -217,28 +225,28 @@ export const compressPlugin = createPlugin({
 export const normalizePlugin = createPlugin({
   name: 'normalize',
   afterParse: (result: ParsedQuery): ParsedQuery => {
-    return normalizeValues(result);
+    return normalizeValues(result) as ParsedQuery;
   },
 });
 
-function normalizeValues(obj: unknown): any {
+function normalizeValues(obj: unknown): unknown {
   if (obj === null || obj === undefined) {
     return obj;
   }
 
   if (typeof obj === 'string') {
     const trimmed = obj.trim();
-    
+
     if (trimmed === 'true') return true;
     if (trimmed === 'false') return false;
     if (trimmed === 'null') return null;
     if (trimmed === 'undefined') return undefined;
-    
+
     const num = Number(trimmed);
     if (!isNaN(num) && trimmed === String(num)) {
       return num;
     }
-    
+
     return trimmed;
   }
 

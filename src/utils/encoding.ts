@@ -1,4 +1,4 @@
-const hexTable = (() => {
+const hexTable = ((): string[] => {
   const array: string[] = [];
   for (let i = 0; i < 256; ++i) {
     array.push('%' + ((i < 16 ? '0' : '') + i.toString(16)).toUpperCase());

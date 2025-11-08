@@ -100,23 +100,23 @@ export function parse(input: string, options?: ParseOptions): ParsedQuery {
     const equalIndex = pair.indexOf('=');
 
     let key: string;
-    let val: string;
+    let val: string | null;
 
     if (equalIndex === -1) {
       key = shouldDecode ? decoder(pair, decode) : pair;
-      val = strictNullHandling ? null as any : '';
+      val = strictNullHandling ? null : '';
     } else {
       key = shouldDecode ? decoder(pair.slice(0, equalIndex), decode) : pair.slice(0, equalIndex);
       val = shouldDecode ? decoder(pair.slice(equalIndex + 1), decode) : pair.slice(equalIndex + 1);
     }
 
-    if (shouldInterpretNumericEntities && charset === 'iso-8859-1') {
+    if (shouldInterpretNumericEntities && charset === 'iso-8859-1' && val !== null) {
       val = interpretNumericEntities(val);
     }
 
     let parsedValue: QueryValue = val;
 
-    if (typeCoercionOpts.numbers || typeCoercionOpts.booleans) {
+    if ((typeCoercionOpts.numbers || typeCoercionOpts.booleans) && typeof val === 'string') {
       parsedValue = parseArrayValue(val, {
         parseNumbers: typeCoercionOpts.numbers,
         parseBooleans: typeCoercionOpts.booleans,
@@ -126,7 +126,7 @@ export function parse(input: string, options?: ParseOptions): ParsedQuery {
     if (typeCoercionOpts.dates && typeof parsedValue === 'string') {
       const dateValue = tryParseDate(parsedValue);
       if (dateValue instanceof Date) {
-        parsedValue = dateValue as any;
+        parsedValue = dateValue as unknown as QueryValue;
       }
     }
 
@@ -144,7 +144,7 @@ export function parse(input: string, options?: ParseOptions): ParsedQuery {
       keys = key.split('.');
     } else if (key.includes('[') && key.includes(']')) {
       // Handle bracket notation like a[b][c]
-      keys = key.split(/[\[\]]+/).filter(Boolean);
+      keys = key.split(/[[\]]+/).filter(Boolean);
     } else {
       keys = [key];
     }

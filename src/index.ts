@@ -32,52 +32,52 @@ import { QueryBuilder as _QueryBuilder } from './builder';
 import { q as _q, schema as _schema, validate as _validate, isValid as _isValid } from './schema';
 import { PluginManager } from './plugins';
 import { createSecureParser } from './security';
-import { ParseOptions, StringifyOptions } from './types';
+import { ParseOptions, StringifyOptions, QueryBuilderOptions, SecurityOptions, ParsedQuery } from './types';
 
 const defaultPluginManager = new PluginManager();
 
 export const querystring = {
-  parse: (input: string, options?: ParseOptions & { plugins?: boolean | PluginManager }) => {
+  parse: (input: string, options?: ParseOptions & { plugins?: boolean | PluginManager }): ParsedQuery => {
     const { plugins, ...parseOptions } = options || {};
     const pluginManager = plugins === true ? defaultPluginManager : plugins instanceof PluginManager ? plugins : null;
-    
+
     if (pluginManager) {
       const processedInput = pluginManager.applyBeforeParse(input, parseOptions);
       const result = _parse(processedInput, parseOptions);
       return pluginManager.applyAfterParse(result, parseOptions);
     }
-    
+
     return _parse(input, parseOptions);
   },
-  
-  stringify: (obj: unknown, options?: StringifyOptions & { plugins?: boolean | PluginManager }) => {
+
+  stringify: (obj: unknown, options?: StringifyOptions & { plugins?: boolean | PluginManager }): string => {
     const { plugins, ...stringifyOptions } = options || {};
     const pluginManager = plugins === true ? defaultPluginManager : plugins instanceof PluginManager ? plugins : null;
-    
+
     if (pluginManager) {
-      const processedObj = pluginManager.applyBeforeStringify(obj as any, stringifyOptions);
+      const processedObj = pluginManager.applyBeforeStringify(obj as ParsedQuery, stringifyOptions);
       const result = _stringify(processedObj, stringifyOptions);
       return pluginManager.applyAfterStringify(result, stringifyOptions);
     }
-    
+
     return _stringify(obj, stringifyOptions);
   },
-  
+
   parseUrl: _parseUrl,
   stringifyUrl: _stringifyUrl,
-  
+
   QueryBuilder: _QueryBuilder,
-  builder: (options?: any) => new _QueryBuilder(options),
-  
+  builder: (options?: QueryBuilderOptions): _QueryBuilder => new _QueryBuilder(options),
+
   q: _q,
   schema: _schema,
   validate: _validate,
   isValid: _isValid,
-  
+
   plugins: defaultPluginManager,
-  
-  createSecureParser: (options?: any) => createSecureParser(_parse, options),
-  
+
+  createSecureParser: (options?: SecurityOptions): ((input: string, options?: ParseOptions) => ParsedQuery) => createSecureParser(_parse, options),
+
   version: '1.0.0',
 };
 
