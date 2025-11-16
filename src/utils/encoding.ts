@@ -28,8 +28,8 @@ export function encode(str: string, format: 'RFC1738' | 'RFC3986' = 'RFC3986', a
       c === 0x7E || // ~
       (allowBrackets && (c === 0x5B || c === 0x5D)) || // [ ]
       (c >= 0x30 && c <= 0x39) || // 0-9
-      (c >= 0x41 && c <= 0x5A) || // a-z
-      (c >= 0x61 && c <= 0x7A) || // A-Z
+      (c >= 0x41 && c <= 0x5A) || // A-Z
+      (c >= 0x61 && c <= 0x7A) || // a-z
       (format === ('RFC1738' as string) && (c === 0x28 || c === 0x29)) // ( )
     ) {
       out.push(string[i]);
@@ -104,9 +104,10 @@ export function interpretNumericEntities(str: string): string {
 }
 
 export function parseArrayValue(val: string, options: { parseNumbers?: boolean; parseBooleans?: boolean }): string | number | boolean {
-  if (options.parseNumbers && !Number.isNaN(Number(val))) {
-    const numVal = parseFloat(val);
-    if (val === String(numVal)) {
+  if (options.parseNumbers) {
+    const numVal = Number(val);
+    // Parse as number if it's a valid number and not an empty/whitespace string
+    if (!Number.isNaN(numVal) && val.trim() !== '') {
       return numVal;
     }
   }

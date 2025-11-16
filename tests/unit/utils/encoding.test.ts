@@ -180,6 +180,18 @@ describe('Encoding utilities', () => {
       expect(parseArrayValue('-123', { parseNumbers: true })).toBe(-123);
     });
 
+    it('should parse numbers with trailing zeros (BUG-NEW-002 fix)', () => {
+      expect(parseArrayValue('1.0', { parseNumbers: true })).toBe(1);
+      expect(parseArrayValue('2.00', { parseNumbers: true })).toBe(2);
+      expect(parseArrayValue('0.0', { parseNumbers: true })).toBe(0);
+      expect(parseArrayValue('123.000', { parseNumbers: true })).toBe(123);
+    });
+
+    it('should not parse empty or whitespace strings as numbers', () => {
+      expect(parseArrayValue('', { parseNumbers: true })).toBe('');
+      expect(parseArrayValue('   ', { parseNumbers: true })).toBe('   ');
+    });
+
     it('should parse booleans when enabled', () => {
       expect(parseArrayValue('true', { parseBooleans: true })).toBe(true);
       expect(parseArrayValue('false', { parseBooleans: true })).toBe(false);
