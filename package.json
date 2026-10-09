@@ -21,7 +21,7 @@
   "scripts": {
     "build": "npm run build:cjs && npm run build:esm",
     "build:cjs": "tsc",
-    "build:esm": "tsc --module esnext --outDir dist/esm --target es2020 && node -e \"const fs=require('fs'); const path=require('path'); function renameJsToMjs(dir) { const files=fs.readdirSync(dir); files.forEach(file => { const fullPath=path.join(dir,file); if(fs.statSync(fullPath).isDirectory()) { renameJsToMjs(fullPath); } else if(file.endsWith('.js')) { const mjsPath=fullPath.replace('.js','.mjs'); fs.renameSync(fullPath,mjsPath); } }); } renameJsToMjs('dist/esm'); fs.writeFileSync('dist/index.mjs', fs.readFileSync('dist/esm/index.mjs')); console.log('ESM build complete');\"",
+    "build:esm": "tsc --module esnext --outDir dist/esm --target es2020 && node scripts/build-esm.js",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",

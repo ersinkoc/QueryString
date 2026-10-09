@@ -348,4 +348,82 @@ describe('Security', () => {
       expect(result).toEqual({ safe: 'value', another: 'test' });
     });
   });
+
+  describe('sanitizer evasion and __proto__ keys (audit F004/F005)', () => {
+    it('removes patterns that re-form after a removal pass (F004)', () => {
+      expect(sanitizeInput('javajavascript:script:alert(1)')).toBe('alert(1)');
+      expect(sanitizeInput('vbvbscript:script:x')).toBe('x');
+      expect(sanitizeInput('jajajavascript:vascript:vascript:x')).toBe('x');
+      expect(sanitizeInput('un--ion', { aggressive: true })).toBe('');
+      expect(detectXSS({ v: sanitizeInput('javajavascript:script:alert(1)') })).toEqual([]);
+    });
+
+    it('leaves benign input unchanged and is idempotent (F004)', () => {
+      expect(sanitizeInput('hello world')).toBe('hello world');
+      const once = sanitizeInput('<b>bold</b> & "quotes"');
+      expect(sanitizeInput(once)).toBe(once);
+    });
+
+    it('accepts the documented options-only call and uses the built-in parse (F042)', () => {
+      const docOptions = { maxKeys: 100, maxDepth: 5, allowPrototypes: false, sanitize: true };
+      expect(createSecureParser(docOptions)('a=1&b=2')).toEqual({ a: '1', b: '2' });
+      expect(createSecureParser()('a=1')).toEqual({ a: '1' });
+      expect(createSecureParser({ sanitize: true })('a=%3Cb%3E')).toEqual({ a: '&lt;b&gt;' });
+      expect(() => createSecureParser({ maxKeys: 1 })('a=1&b=2')).toThrow('Security validation failed');
+      const deep = createSecureParser({ maxDepth: 1 });
+      expect(() => deep('a[b][c][d]=1')).toThrow('Security validation failed');
+      expect(createSecureParser({ maxKeys: 10 })('a=1', { parseNumbers: true })).toEqual({ a: 1 });
+      expect(createSecureParser((s: string) => ({ q: s }))('x')).toEqual({ q: 'x' });
+    });
+
+    it('drops __proto__ keys instead of rewriting the prototype when sanitizing (F005)', () => {
+      const payload = () => JSON.parse('{"__proto__":{"admin":true},"comment":"x"}');
+      const result = createSecureParser(payload, { sanitize: true })('q');
+      expect(result).toEqual({ comment: 'x' });
+      expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+      expect((result as Record<string, unknown>).admin).toBeUndefined();
+      expect(secureStringify(JSON.parse('{"__proto__":{"admin":true},"a":"1"}'), { sanitize: true })).toBe('{"a":"1"}');
+    });
+
+    it('still rejects __proto__ when sanitize is false (F005)', () => {
+      const payload = () => JSON.parse('{"__proto__":{"admin":true},"comment":"x"}');
+      expect(() => createSecureParser(payload, { sanitize: false })('q')).toThrow('Prototype pollution detected');
+    });
+  });
+
+  describe('Dates and exotic objects (audit F031/F032)', () => {
+    it('keeps Date values intact when sanitizing (F031)', () => {
+      const parsed = createSecureParser(parse, { sanitize: true })('d=1970-01-01T00:00:00.000Z&o[d]=1970-01-01T00:00:00.000Z', {
+        parseDates: true,
+      }) as unknown as { d: Date; o: { d: Date } };
+      expect(parsed.d).toBeInstanceOf(Date);
+      expect(parsed.d.getTime()).toBe(0);
+      expect(parsed.o.d).toBeInstanceOf(Date);
+      expect(secureStringify({ d: new Date(0), l: [new Date(0)] }, { sanitize: true })).toBe(
+        '{"d":"1970-01-01T00:00:00.000Z","l":["1970-01-01T00:00:00.000Z"]}'
+      );
+    });
+
+    it('does not execute prototype accessors or reject Map/Set values (F032)', () => {
+      let getterCalls = 0;
+      class WithGetter {
+        get computed(): string {
+          getterCalls++;
+          throw new Error('getter executed');
+        }
+      }
+
+      expect(hasPrototypePollution({ m: new Map([[1, 2]]), s: new Set([1]) })).toBe(false);
+      expect(hasPrototypePollution({ w: new WithGetter() })).toBe(false);
+      expect(getterCalls).toBe(0);
+      expect(validateSecurity({ m: new Map() } as never).valid).toBe(true);
+      expect(secureStringify({ m: new Map() })).toBe('{"m":{}}');
+    });
+
+    it('still detects data properties planted on a prototype (F032)', () => {
+      expect(hasPrototypePollution(Object.setPrototypeOf({ a: 1 }, { admin: true }))).toBe(true);
+      expect(hasPrototypePollution({ deep: { inner: Object.create({ admin: true }) } })).toBe(true);
+      expect(hasPrototypePollution({ l: [Object.setPrototypeOf({}, { admin: 'yes' })] })).toBe(true);
+    });
+  });
 });

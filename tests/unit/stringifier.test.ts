@@ -1,4 +1,5 @@
 import { stringify, stringifyUrl } from '../../src/stringifier';
+import { parse } from '../../src/parser';
 
 describe('Stringifier', () => {
   describe('stringify', () => {
@@ -368,6 +369,113 @@ describe('Stringifier', () => {
       const obj = { complex: { data: { nested: 'value' } } };
       const result = stringify(obj, { arrayFormat: 'json' });
       expect(result).toContain('complex'); // Object gets flattened instead of JSON.stringify
+    });
+  });
+
+  describe('array element encoding and null handling (audit F006/F008)', () => {
+    it('percent-encodes array element values in every array format (F006)', () => {
+      expect(stringify({ a: ['x&y=z'] })).toBe('a=x%26y%3Dz');
+      expect(stringify({ a: ['x&y'] }, { arrayFormat: 'brackets' })).toBe('a[]=x%26y');
+      expect(stringify({ a: ['p&q', 'r'] }, { arrayFormat: 'indices' })).toBe('a[0]=p%26q&a[1]=r');
+      expect(stringify({ a: ['x&y', 'b,c'] }, { arrayFormat: 'comma' })).toBe('a=x%26y,b%2Cc');
+      expect(stringify({ a: [new Date(0)] })).toBe('a=1970-01-01T00%3A00%3A00.000Z');
+      expect(stringify({ a: ['é'] })).toBe('a=%C3%A9');
+    });
+
+    it('round-trips array values containing delimiters (F006)', () => {
+      const value = { a: ['x&y=z', 'b c'] };
+      expect(parse(stringify(value))).toEqual(value);
+    });
+
+    it('leaves array values raw when encode is false (F006)', () => {
+      expect(stringify({ a: ['x&y'] }, { encode: false })).toBe('a=x&y');
+    });
+
+    it('lets skipNulls win over strictNullHandling (F008)', () => {
+      expect(stringify({ a: null, b: 1 }, { skipNulls: true, strictNullHandling: true })).toBe('b=1');
+      expect(stringify({ o: { a: undefined, c: 2 } }, { skipNulls: true, strictNullHandling: true })).toBe('o[c]=2');
+      expect(stringify({ a: null, b: 1 }, { strictNullHandling: true })).toBe('a&b=1');
+    });
+  });
+
+  describe('comma/indices options and URL fragments (audit F024/F025)', () => {
+    it('honors the documented comma and indices options (F024)', () => {
+      expect(stringify({ a: [1, 2] }, { comma: true })).toBe('a=1,2');
+      expect(stringify({ a: [1, 2] }, { indices: true })).toBe('a[0]=1&a[1]=2');
+      expect(stringify({ o: { a: [1, 2] } }, { indices: true })).toBe('o[a][0]=1&o[a][1]=2');
+      expect(stringify({ a: [1, 2] }, { comma: true, indices: true })).toBe('a=1,2');
+      expect(stringify({ a: [1, 2] })).toBe('a=1&a=2');
+    });
+
+    it('lets an explicit arrayFormat win over comma and indices (F024)', () => {
+      expect(stringify({ a: [1, 2] }, { arrayFormat: 'brackets', indices: true })).toBe('a[]=1&a[]=2');
+      expect(stringify({ a: [1, 2] }, { arrayFormat: 'brackets', comma: true })).toBe('a[]=1&a[]=2');
+    });
+
+    it('places the query before the URL fragment (F025)', () => {
+      expect(stringifyUrl('http://x.com/p#frag', { a: 1 })).toBe('http://x.com/p?a=1#frag');
+      expect(stringifyUrl('http://x.com/p?z=1#frag', { a: 1 })).toBe('http://x.com/p?z=1&a=1#frag');
+      expect(stringifyUrl('http://x.com/p#a#b', { a: 1 })).toBe('http://x.com/p?a=1#a#b');
+      expect(stringifyUrl('http://x.com/p#frag', {})).toBe('http://x.com/p#frag');
+    });
+  });
+
+  describe('commaRoundTrip (F040)', () => {
+    it('writes a one-element comma array as a[] so it parses back as an array', () => {
+      const opts = { arrayFormat: 'comma', commaRoundTrip: true } as const;
+      expect(stringify({ a: ['x'] }, opts)).toBe('a[]=x');
+      expect(parse(stringify({ a: ['x'] }, opts), { comma: true })).toEqual({ a: ['x'] });
+      expect(stringify({ a: ['x'] }, { comma: true, commaRoundTrip: true })).toBe('a[]=x');
+      expect(stringify({ o: { k: ['x'] } }, opts)).toBe('o[k][]=x');
+      expect(stringify({ a: ['x y'] }, { ...opts, encodeValuesOnly: true })).toBe('a[]=x%20y');
+    });
+
+    it('is off by default and leaves other arrays and formats alone', () => {
+      expect(stringify({ a: ['x'] }, { arrayFormat: 'comma' })).toBe('a=x');
+      const multi = { arrayFormat: 'comma', commaRoundTrip: true } as const;
+      expect(stringify({ a: ['x', 'y'] }, multi)).toBe('a=x,y');
+      expect(stringify({ a: [] }, { arrayFormat: 'comma', commaRoundTrip: true })).toBe('');
+      expect(stringify({ a: ['x'] }, { arrayFormat: 'repeat', commaRoundTrip: true })).toBe('a=x');
+    });
+  });
+
+  describe('charset iso-8859-1 (F039)', () => {
+    const latin1 = { charset: 'iso-8859-1' } as const;
+
+    it('encodes latin1 characters as single %XX bytes and others as numeric references', () => {
+      expect(stringify({ a: 'José' }, latin1)).toBe('a=Jos%E9');
+      expect(stringify({ é: '1' }, latin1)).toBe('%E9=1');
+      expect(stringify({ a: '€' }, latin1)).toBe('a=%26%238364%3B');
+      expect(stringify({ a: '\u{1F600}' }, latin1)).toBe('a=%26%23128512%3B');
+      expect(stringify({ a: ['é', '€'] }, latin1)).toBe('a=%E9&a=%26%238364%3B');
+    });
+
+    it('round-trips through parse', () => {
+      const entities = { ...latin1, interpretNumericEntities: true };
+      expect(parse(stringify({ a: 'Jé €' }, latin1), entities)).toEqual({ a: 'Jé €' });
+      expect(parse(stringify({ é: 'ÿ ü' }, latin1), latin1)).toEqual({ é: 'ÿ ü' });
+    });
+
+    it('honours format and encodeValuesOnly, and still rejects lone surrogates', () => {
+      expect(stringify({ a: "x y!'()*é" }, { ...latin1, format: 'RFC1738' })).toBe("a=x+y!'()*%E9");
+      expect(stringify({ a: "!'()*" }, latin1)).toBe('a=%21%27%28%29%2A');
+      expect(stringify({ a: { b: 'é' } }, { ...latin1, encodeValuesOnly: true })).toBe('a[b]=%E9');
+      expect(() => stringify({ a: '\ud800' }, latin1)).toThrow('Invalid UTF-8');
+    });
+
+    it('round-trips its own charset sentinel through parse (F044)', () => {
+      const withSentinel = { ...latin1, charsetSentinel: true };
+      expect(stringify({ a: 'José' }, withSentinel)).toBe('utf8=%26%2310003%3B&a=Jos%E9');
+      expect(parse(stringify({ a: 'José' }, withSentinel), withSentinel)).toEqual({ a: 'José' });
+      const utf8 = { charsetSentinel: true };
+      expect(parse(stringify({ a: 'José' }, utf8), utf8)).toEqual({ a: 'José' });
+    });
+
+    it('keeps utf-8 as the default and hands the charset to a custom encoder', () => {
+      expect(stringify({ a: 'José' })).toBe('a=Jos%C3%A9');
+      expect(stringify({ a: 'é€' }, { charset: 'utf-8' })).toBe('a=%C3%A9%E2%82%AC');
+      const encoder = (s: string, d: (x: string) => string, cs?: string) => `${cs}:${d(s)}`;
+      expect(stringify({ a: 'é' }, { ...latin1, encoder })).toBe('iso-8859-1:a=iso-8859-1:%E9');
     });
   });
 });

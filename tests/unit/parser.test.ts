@@ -1,4 +1,5 @@
 import { parse, parseUrl } from '../../src/parser';
+import { stringify } from '../../src/stringifier';
 
 describe('Parser', () => {
   describe('parse', () => {
@@ -187,6 +188,25 @@ describe('Parser', () => {
           interpretNumericEntities: true 
         })).toEqual({ foo: 'ABC' });
       });
+
+      it('decodes each %XX as one latin1 character for iso-8859-1 (F038)', () => {
+        const latin1 = { charset: 'iso-8859-1' } as const;
+        expect(parse('a=Jos%E9', latin1)).toEqual({ a: 'José' });
+        expect(parse('%E9=1', latin1)).toEqual({ é: '1' });
+        expect(parse('a=x+%e9', latin1)).toEqual({ a: 'x é' });
+        expect(parse('a=%C3%A9', latin1)).toEqual({ a: 'Ã©' });
+        expect(parse('a=%E9&a=%E8', latin1)).toEqual({ a: ['é', 'è'] });
+        expect(parse('a=100%25&b=%zz', latin1)).toEqual({ a: '100%', b: '%zz' });
+        expect(parse('a%5Bb%5D=%E9', latin1)).toEqual({ a: { b: 'é' } });
+      });
+
+      it('keeps utf-8 decoding by default and lets a custom decoder win (F038)', () => {
+        expect(parse('a=Jos%E9')).toEqual({ a: 'Jos%E9' });
+        expect(parse('a=Jos%C3%A9', { charset: 'utf-8' })).toEqual({ a: 'José' });
+        const decoder = (s: string) => `X${s}`;
+        expect(parse('a=%E9', { charset: 'iso-8859-1', decoder })).toEqual({ Xa: 'X%E9' });
+        expect(parse('a=%E9', { charset: 'iso-8859-1', decode: false })).toEqual({ a: '%E9' });
+      });
     });
 
     describe('edge cases', () => {
@@ -245,10 +265,23 @@ describe('Parser', () => {
 
   describe('Edge cases for coverage', () => {
     it('should handle comma option with comma-separated values', () => {
-      const result = parse('tags=a,b,c', { comma: true });
-      // comma option converts comma-separated values to arrays in stringifier
-      // but this is about the parser - comma mostly affects parsing behavior
-      expect(result).toEqual({ tags: 'a,b,c' });
+      // [F041] comma: true splits comma-separated values into arrays (the default keeps the string).
+      expect(parse('tags=a,b,c', { comma: true })).toEqual({ tags: ['a', 'b', 'c'] });
+      expect(parse('tags=a,b,c')).toEqual({ tags: 'a,b,c' });
+    });
+
+    it('lets an explicit arrayFormat win over comma and keeps scalars scalar (F041)', () => {
+      expect(parse('a=x,y', { comma: true, arrayFormat: 'repeat' })).toEqual({ a: 'x,y' });
+      expect(parse('a=x', { comma: true })).toEqual({ a: 'x' });
+      expect(parse('o[k]=1,2&a=1,2&a=3', { comma: true })).toEqual({ o: { k: ['1', '2'] }, a: ['1', '2', '3'] });
+      expect(parse('a=x,y', { comma: true, parseArrays: false })).toEqual({ a: 'x,y' });
+    });
+
+    it('parses a[] as an array under the comma format so commaRoundTrip round-trips (F040)', () => {
+      expect(parse('a[]=x', { arrayFormat: 'comma' })).toEqual({ a: ['x'] });
+      expect(parse('a[]=x,y', { arrayFormat: 'comma' })).toEqual({ a: ['x', 'y'] });
+      expect(parse('o[k][]=x', { arrayFormat: 'comma' })).toEqual({ o: { k: ['x'] } });
+      expect(parse('a=x', { arrayFormat: 'comma' })).toEqual({ a: 'x' });
     });
 
     it('should handle empty keys array in parseObject', () => {
@@ -299,6 +332,109 @@ describe('Parser', () => {
       const result2 = parse('nested[deep][prop]=value', { plainObjects: true });
       expect(typeof result2.nested).toBe('object');
       expect((result2.nested as any).deep.prop).toBe('value');
+    });
+  });
+
+  describe('conflicting and sparse keys (audit F001/F003)', () => {
+    it('does not throw when a nested key descends through a scalar (F001)', () => {
+      expect(parse('a=1&a[b]=2')).toEqual({ a: ['1', { b: '2' }] });
+      expect(parse('a[b]=1&a[b][c]=2')).toEqual({ a: { b: ['1', { c: '2' }] } });
+      expect(parse('a&a[b]=1', { strictNullHandling: true })).toEqual({ a: [null, { b: '1' }] });
+    });
+
+    it('resolves scalar/nested conflicts with the duplicates policy (F001)', () => {
+      expect(parse('a=1&a[b]=2', { duplicates: 'last' })).toEqual({ a: { b: '2' } });
+      expect(parse('a=1&a[b]=2', { duplicates: 'first' })).toEqual({ a: '1' });
+      expect(parse('a=1&a[0]=2')).toEqual({ a: ['1', ['2']] });
+    });
+
+    it('does not throw for comma with strictNullHandling on a bare key (F002)', () => {
+      expect(parse('a&b=1,2', { comma: true, strictNullHandling: true })).toEqual({ a: null, b: ['1', '2'] });
+    });
+
+    it('produces dense arrays by default so a[50000000]=x cannot allocate a huge array (F003)', () => {
+      const result = parse('a[50000000]=x&b[3]=y&b[1]=z') as { a: string[]; b: string[] };
+      expect(result.a).toEqual(['x']);
+      expect(result.a.length).toBe(1);
+      expect(result.b).toEqual(['z', 'y']);
+      expect(parse('o[a][9]=z')).toEqual({ o: { a: ['z'] } });
+    });
+
+    it('keeps holes when allowSparse is true (F003)', () => {
+      const result = parse('a[5]=x', { allowSparse: true }) as { a: string[] };
+      expect(result.a.length).toBe(6);
+      expect(0 in result.a).toBe(false);
+    });
+  });
+
+  describe('single-element arrays, named keys on arrays, charset sentinel (audit F021/F022/F023)', () => {
+    const brackets = { arrayFormat: 'brackets' } as const;
+    const indices = { arrayFormat: 'indices' } as const;
+
+    it('keeps one-element arrays as arrays for brackets and indices formats (F021)', () => {
+      expect(parse('a[]=1', brackets)).toEqual({ a: ['1'] });
+      expect(parse('a[0]=1', indices)).toEqual({ a: ['1'] });
+      expect(parse('o[a][]=1', brackets)).toEqual({ o: { a: ['1'] } });
+      expect(parse('a[]=', brackets)).toEqual({ a: [''] });
+      expect(parse('a=0&a[]=1', brackets)).toEqual({ a: ['0', '1'] });
+      // the default 'repeat' format does not interpret the bracket syntax
+      expect(parse('a[]=1')).toEqual({ a: '1' });
+    });
+
+    it('round-trips one-element arrays through stringify (F021)', () => {
+      const value = { a: ['1'], b: ['x', 'y'], c: 'scalar' };
+      expect(parse(stringify(value, brackets), brackets)).toEqual(value);
+      expect(parse(stringify(value, indices), indices)).toEqual(value);
+    });
+
+    it('does not lose named keys written under an array (F022)', () => {
+      expect(parse('a=1&a=2&a[b]=3')).toEqual({ a: ['1', '2', { b: '3' }] });
+      expect(parse('a=1&a=2&a[b]=3&a[c]=4')).toEqual({ a: ['1', '2', { b: '3', c: '4' }] });
+      expect(parse('a[0]=x&a[b]=y')).toEqual({ a: ['x', { b: 'y' }] });
+      expect(parse('a[b]=1&a=2&a[c]=3')).toEqual({ a: [{ b: '1' }, '2', { c: '3' }] });
+      expect(parse('a[0][b]=1&a[1][b]=2')).toEqual({ a: [{ b: '1' }, { b: '2' }] });
+    });
+
+    it('treats + as a space even when a value or key has a malformed escape (F045)', () => {
+      expect(parse('q=hello+world%')).toEqual({ q: 'hello world%' });
+      expect(parse('a+b%zz=1')).toEqual({ 'a b%zz': '1' });
+      expect(parse('a=x+y%zz', { decode: false })).toEqual({ a: 'x+y%zz' });
+    });
+
+    it('only consumes a pair that is exactly the charset sentinel (F023)', () => {
+      const options = { charsetSentinel: true } as const;
+      expect(parse('myutf8=%E2%9C%93&a=1', options)).toEqual({ myutf8: '✓', a: '1' });
+      expect(parse('q=xutf8=%E2%9C%93&a=1', options)).toEqual({ q: 'xutf8=✓', a: '1' });
+      expect(parse('a=1&utf8=%E2%9C%93&b=2', options)).toEqual({ a: '1', b: '2' });
+      expect(parse('a=1;utf8=%E2%9C%93', { ...options, delimiter: ';' })).toEqual({ a: '1' });
+    });
+
+    it('consumes the iso-8859-1 sentinel and lets either sentinel select the charset (F044)', () => {
+      const latin1 = { charset: 'iso-8859-1', charsetSentinel: true } as const;
+      expect(parse('utf8=%26%2310003%3B&foo=bar', latin1)).toEqual({ foo: 'bar' });
+      expect(parse('utf8=%26%2310003%3B', latin1)).toEqual({});
+      const semi = { charsetSentinel: true, delimiter: ';' } as const;
+      expect(parse('a=Jos%E9;utf8=%26%2310003%3B', semi)).toEqual({ a: 'José' });
+      expect(parse('utf8=%E2%9C%93&a=Jos%C3%A9', { ...latin1 })).toEqual({ a: 'José' });
+      const entities = { charsetSentinel: true, interpretNumericEntities: true } as const;
+      expect(parse('utf8=%26%2310003%3B&a=%26%238364%3B', entities)).toEqual({ a: '€' });
+      expect(parse('utf8=%26%2310003%3B&a=1')).toEqual({ utf8: '&#10003;', a: '1' });
+      expect(parse('utf8=%26%2310004%3B&a=1', latin1)).toEqual({ utf8: '&#10004;', a: '1' });
+      const both = parse('utf8=%E2%9C%93&utf8=%26%2310003%3B&a=%C3%A9', { charsetSentinel: true });
+      expect(both).toEqual({ utf8: '&#10003;', a: 'é' });
+    });
+  });
+
+  describe('parseUrl fragments (audit F026)', () => {
+    it('ends the query at the fragment', () => {
+      expect(parseUrl('http://x.com/p?a=1&b=2#frag')).toEqual({ url: 'http://x.com/p', query: { a: '1', b: '2' } });
+      expect(parseUrl('http://x.com/p?#frag')).toEqual({ url: 'http://x.com/p', query: {} });
+      expect(parseUrl('http://x.com/p?a=%23x#f')).toEqual({ url: 'http://x.com/p', query: { a: '#x' } });
+    });
+
+    it('does not treat a "?" inside the fragment as a query', () => {
+      expect(parseUrl('http://x.com/p#frag?a=1')).toEqual({ url: 'http://x.com/p#frag?a=1', query: {} });
+      expect(parseUrl('http://x.com/p?a=1#frag?x=2')).toEqual({ url: 'http://x.com/p', query: { a: '1' } });
     });
   });
 });

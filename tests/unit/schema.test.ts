@@ -619,4 +619,81 @@ describe('Schema Validation', () => {
       expect(isValid(mySchema, 123)).toBe(false);
     });
   });
+
+  describe('number coercion and prototype-safe objects (audit F009/F010/F011)', () => {
+    it('rejects empty and non-scalar values for numbers (F009)', () => {
+      for (const bad of [null, '', '   ', [], [5], new Date(0), NaN]) {
+        expect(() => q.number().parse(bad)).toThrow('Expected number');
+      }
+      expect(q.number().parse(' 12 ')).toBe(12);
+      expect(q.number().parse('1e3')).toBe(1000);
+      expect(q.number().default(7).parse(undefined)).toBe(7);
+    });
+
+    it('keeps __proto__ input from replacing the result prototype (F010)', () => {
+      const payload = () => JSON.parse('{"a":"x","__proto__":{"admin":true}}');
+      const results = [
+        q.object().parse(payload()),
+        q.object().shape({ a: q.string() }).passthrough().parse(payload()),
+        q.object().shape({ a: q.string() }).catchall(q.object()).parse(payload()),
+      ] as Array<Record<string, unknown>>;
+
+      for (const result of results) {
+        expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+        expect(result.admin).toBeUndefined();
+        expect(Object.prototype.hasOwnProperty.call(result, '__proto__')).toBe(true);
+      }
+      expect(({} as Record<string, unknown>).admin).toBeUndefined();
+    });
+
+    it('does not treat Object.prototype members as declared keys (F011)', () => {
+      const strict = q.object().shape({ a: q.string() }).strict();
+      expect(() => strict.parse(JSON.parse('{"a":"x","constructor":"y"}'))).toThrow('Unknown key "constructor"');
+      expect(() => strict.parse(JSON.parse('{"a":"x","toString":"y"}'))).toThrow('Unknown key "toString"');
+
+      const kept = q.object().shape({ a: q.string() }).passthrough().parse(JSON.parse('{"a":"x","toString":"y"}')) as Record<string, unknown>;
+      expect(Object.prototype.hasOwnProperty.call(kept, 'toString')).toBe(true);
+      expect(kept.toString).toBe('y');
+
+      expect(q.object().shape({ valueOf: q.string().optional() }).parse({}).valueOf).toBeUndefined();
+    });
+  });
+
+  describe('regex state, fractional steps, derived object schemas (audit F028/F029/F030)', () => {
+    it('validates repeatedly with global and sticky regular expressions (F028)', () => {
+      for (const re of [/a/g, /^[a-z]+$/g, /a/y]) {
+        const schema = q.string().regex(re);
+        const input = re.source === '^[a-z]+$' ? 'abc' : 'a';
+        expect([1, 2, 3, 4].map(() => schema.safeParse(input).success)).toEqual([true, true, true, true]);
+      }
+      const rejecting = q.string().regex(/a/g);
+      expect(['a', 'b', 'a', 'b', 'a'].map((v) => rejecting.safeParse(v).success)).toEqual([true, false, true, false, true]);
+    });
+
+    it('accepts exact multiples of fractional steps (F029)', () => {
+      for (const [value, step] of [[0.3, 0.1], [0.6, 0.1], [1.1, 0.1], [0.07, 0.01], [19.99, 0.01], [-0.3, 0.1], [7.5, 2.5]]) {
+        expect(q.number().multipleOf(step).safeParse(value).success).toBe(true);
+      }
+      for (const [value, step] of [[0.35, 0.1], [0.001, 0.01], [2.5, 5], [100, 3], [5, 0]]) {
+        expect(q.number().multipleOf(step).safeParse(value).success).toBe(false);
+      }
+    });
+
+    it('keeps the unknown-key policy in derived object schemas (F030)', () => {
+      const base = () => q.object().shape({ a: q.string(), b: q.string() });
+      expect(() => base().strict().pick(['a']).parse({ a: 'x', z: 1 })).toThrow('Unknown key "z"');
+      expect(() => base().strict().omit(['b']).parse({ a: 'x', z: 1 })).toThrow('Unknown key "z"');
+      expect(() => base().strict().extend({ c: q.string() }).parse({ a: 'x', b: 'y', c: 'w', z: 1 })).toThrow('Unknown key "z"');
+      expect(() => base().strict().partial().parse({ a: 'x', z: 1 })).toThrow('Unknown key "z"');
+      expect(() => base().merge(q.object().shape({ c: q.string() }).strict()).parse({ a: 'x', b: 'y', c: 'w', z: 1 })).toThrow(
+        'Unknown key "z"'
+      );
+      expect(base().passthrough().omit(['b']).parse({ a: 'x', z: 1 })).toEqual({ a: 'x', z: 1 });
+      expect(base().pick(['a']).parse({ a: 'x', z: 1 })).toEqual({ a: 'x' });
+
+      const catchall = q.object().shape({ a: q.string(), b: q.string() }).catchall(q.number()).pick(['a']);
+      expect(catchall.parse({ a: 'x', n: 1 })).toEqual({ a: 'x', n: 1 });
+      expect(() => catchall.parse({ a: 'x', n: 's' })).toThrow('Invalid value for key "n"');
+    });
+  });
 });

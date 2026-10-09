@@ -414,4 +414,65 @@ describe('Plugin System', () => {
       expect(plugin.afterStringify).toBeUndefined();
     });
   });
+
+  describe('prototype keys, dates and UTF-8 (audit F012/F013/F014)', () => {
+    const payload = (key = '__proto__') => JSON.parse(`{"${key}":{"admin":"true"},"b":"1"}`);
+
+    it('does not rewrite the output prototype for __proto__ keys (F012)', () => {
+      const results = [
+        sortKeysPlugin.beforeStringify!(payload(), {} as StringifyOptions),
+        lowercaseKeysPlugin.afterParse!(payload(), {} as ParseOptions),
+        lowercaseKeysPlugin.afterParse!(payload('__PROTO__'), {} as ParseOptions),
+        lowercaseKeysPlugin.beforeStringify!(payload(), {} as StringifyOptions),
+        filterEmptyPlugin.beforeStringify!(payload(), {} as StringifyOptions),
+        normalizePlugin.afterParse!(payload(), {} as ParseOptions),
+      ] as Array<Record<string, unknown>>;
+
+      for (const result of results) {
+        expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+        expect(result.admin).toBeUndefined();
+        expect(Object.prototype.hasOwnProperty.call(result, '__proto__')).toBe(true);
+      }
+      expect(({} as Record<string, unknown>).admin).toBeUndefined();
+    });
+
+    it('keeps Date values intact when normalizing (F013)', () => {
+      const result = normalizePlugin.afterParse!(
+        { d: new Date(0), o: { d: new Date(0) }, a: [new Date(0)], s: ' 42 ' } as never,
+        {} as ParseOptions
+      ) as unknown as { d: Date; o: { d: Date }; a: Date[]; s: number };
+
+      expect(result.d).toBeInstanceOf(Date);
+      expect(result.d.getTime()).toBe(0);
+      expect(result.o.d.getTime()).toBe(0);
+      expect(result.a[0].getTime()).toBe(0);
+      expect(result.s).toBe(42);
+    });
+
+    it('round-trips non-Latin-1 text through the base64 plugin as UTF-8 (F014)', () => {
+      const nodeBuffer = jest.requireActual('buffer');
+      // Earlier tests in this file replace atob/btoa/Buffer on globalThis without restoring them.
+      (globalThis as any).atob = nodeBuffer.atob;
+      (globalThis as any).btoa = nodeBuffer.btoa;
+
+      const roundTrip = (text: string) =>
+        base64Plugin.beforeParse!(base64Plugin.afterStringify!(text, {} as StringifyOptions), {} as ParseOptions);
+
+      expect(base64Plugin.afterStringify!('a=€', {} as StringifyOptions)).toBe(
+        nodeBuffer.Buffer.from('a=€').toString('base64')
+      );
+      expect(roundTrip('a=€')).toBe('a=€');
+      expect(roundTrip('e=\u{1F600}')).toBe('e=\u{1F600}');
+      expect(roundTrip('foo=bar&baz=qux')).toBe('foo=bar&baz=qux');
+      // base64 of bytes that are not valid UTF-8 is left untouched
+      expect(base64Plugin.beforeParse!('/w==', {} as ParseOptions)).toBe('/w==');
+    });
+
+    it('combines keys that collide after lowercasing instead of dropping values (F037)', () => {
+      expect(lowercaseKeysPlugin.afterParse!({ A: '1', a: '2' }, {} as ParseOptions)).toEqual({ a: ['1', '2'] });
+      expect(lowercaseKeysPlugin.afterParse!({ A: ['1'], a: ['2', '3'] }, {} as ParseOptions)).toEqual({ a: ['1', '2', '3'] });
+      expect(lowercaseKeysPlugin.beforeStringify!({ A: 1, a: 2 }, {} as StringifyOptions)).toEqual({ a: [1, 2] });
+      expect(Object.keys(lowercaseKeysPlugin.afterParse!({ B: '1', A: '2', b: '3' }, {} as ParseOptions))).toEqual(['b', 'a']);
+    });
+  });
 });

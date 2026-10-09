@@ -1,4 +1,4 @@
-import querystring, { PluginManager, timestampPlugin, lowercaseKeysPlugin } from '../../src';
+import querystring, { PluginManager, timestampPlugin, lowercaseKeysPlugin, parse, ParsedQuery } from '../../src';
 
 describe('Main querystring export', () => {
   describe('parse with plugins', () => {
@@ -122,6 +122,63 @@ describe('Main querystring export', () => {
 
     it('should export version', () => {
       expect(querystring.version).toBe('1.0.0');
+    });
+  });
+
+  describe('non-string input with plugins (audit F018)', () => {
+    it('keeps parse() graceful and skips beforeParse hooks for non-string input', () => {
+      let calls = 0;
+      const manager = PluginManager.create([
+        {
+          name: 'upper',
+          beforeParse: (input: string) => {
+            calls++;
+            return input.toUpperCase();
+          },
+        },
+      ]);
+
+      expect(querystring.parse('a=1', { plugins: manager })).toEqual({ A: '1' });
+      calls = 0;
+      for (const bad of [undefined, null, 42]) {
+        expect(querystring.parse(bad as unknown as string, { plugins: manager })).toEqual({});
+      }
+      expect(calls).toBe(0);
+    });
+
+    it('keeps stringify() graceful for non-object input and skips beforeStringify hooks (F036)', () => {
+      const manager = PluginManager.create([lowercaseKeysPlugin, timestampPlugin]);
+
+      for (const bad of [null, undefined, 42, 'text', true]) {
+        expect(querystring.stringify(bad as unknown, { plugins: manager })).toBe('');
+      }
+      expect(querystring.stringify({ A: 1 }, { plugins: PluginManager.create([lowercaseKeysPlugin]) })).toBe('a=1');
+    });
+  });
+
+  // [F043] The documented `querystring.parse<SearchParams>(...)` must type-check (ts-jest fails this file otherwise).
+  describe('typed parse', () => {
+    interface SearchParams {
+      q: string;
+      page: number;
+    }
+
+    it('accepts a type argument on both parse entry points', () => {
+      const params = querystring.parse<SearchParams>('q=x&page=2', { parseNumbers: true });
+      const page: number = params.page;
+      const q: string = params.q;
+      expect({ q, page }).toEqual({ q: 'x', page: 2 });
+      const named = parse<SearchParams>('q=y');
+      expect(named.q).toBe('y');
+      const plugins = PluginManager.create([lowercaseKeysPlugin]);
+      const withPlugins = querystring.parse<SearchParams>('Q=z', { plugins });
+      expect(withPlugins.q).toBe('z');
+    });
+
+    it('keeps ParsedQuery as the default result type', () => {
+      const result: ParsedQuery = querystring.parse('a=1');
+      const named: ParsedQuery = parse('a=1');
+      expect(result).toEqual(named);
     });
   });
 });

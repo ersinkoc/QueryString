@@ -360,4 +360,130 @@ describe('QueryBuilder', () => {
       expect(builder.toObject()).toEqual({});
     });
   });
+
+  describe('prototype keys, baseUrl and aliasing (audit F015/F016/F017)', () => {
+    const evil = () => JSON.parse('{"__proto__":{"admin":true}}');
+
+    it('only reports stored keys from has/get (F015)', () => {
+      const builder = new QueryBuilder().add('a', '1');
+      expect(builder.has('a')).toBe(true);
+      expect(builder.has('toString')).toBe(false);
+      expect(builder.has('constructor')).toBe(false);
+      expect(builder.get('constructor')).toBeUndefined();
+    });
+
+    it('stores __proto__ as data instead of rewriting the query prototype (F015)', () => {
+      const viaAdd = new QueryBuilder().add('__proto__', { admin: true });
+      const viaMultiple = new QueryBuilder().addMultiple(evil());
+      const viaMerge = new QueryBuilder().add('a', '1').merge(evil());
+
+      for (const builder of [viaAdd, viaMultiple, viaMerge]) {
+        expect(builder.has('admin')).toBe(false);
+        expect(builder.get('admin')).toBeUndefined();
+        expect(builder.has('__proto__')).toBe(true);
+        expect(Object.getPrototypeOf(builder.toObject())).toBe(Object.prototype);
+      }
+      expect(({} as Record<string, unknown>).admin).toBeUndefined();
+    });
+
+    it('does not duplicate the baseUrl query when building the URL (F016)', () => {
+      expect(new QueryBuilder({ baseUrl: 'http://x/p?a=1' }).toUrl()).toBe('http://x/p?a=1');
+      expect(new QueryBuilder({ baseUrl: 'http://x/p?a=1' }).add('b', '2').buildUrl()).toBe('http://x/p?a=1&b=2');
+      expect(new QueryBuilder({ baseUrl: 'http://x/p?a=1' }).add('b', '2').toUrl('http://y/q?z=9')).toBe(
+        'http://y/q?z=9&a=1&b=2'
+      );
+    });
+
+    it('append never mutates arrays shared with callers or other builders (F017)', () => {
+      const arr = ['a'];
+      new QueryBuilder().addArray('k', arr).append('k', 'b');
+      expect(arr).toEqual(['a']);
+
+      const source = new QueryBuilder().addArray('k', ['1']);
+      const copy = QueryBuilder.from(source);
+      copy.append('k', '2');
+      source.append('k', '3');
+      expect(source.get('k')).toEqual(['1', '3']);
+      expect(copy.get('k')).toEqual(['1', '2']);
+
+      const obj = { k: ['1'] };
+      QueryBuilder.create(obj).append('k', '2');
+      expect(obj).toEqual({ k: ['1'] });
+    });
+  });
+
+  describe('baseUrl seeding, derived builders and clone (audit F033/F034/F035)', () => {
+    const withBase = () => new QueryBuilder({ baseUrl: 'http://x/p?a=1' }).add('b', '2');
+
+    it('pick/omit/filter contain only the selected entries (F033)', () => {
+      expect(withBase().pick('b').toObject()).toEqual({ b: '2' });
+      expect(withBase().omit('a').toObject()).toEqual({ b: '2' });
+      expect(withBase().filter(() => false).toObject()).toEqual({});
+      expect(withBase().pick('a').toObject()).toEqual({ a: '1' });
+      expect(withBase().pick('b').toUrl()).toBe('http://x/p?b=2');
+      expect(withBase().omit('a').toUrl()).toBe('http://x/p?b=2');
+    });
+
+    it('create/from keep the baseUrl parameters and let given values win (F034)', () => {
+      const base = { baseUrl: 'http://x/p?a=1' };
+      expect(QueryBuilder.create({ c: 3 }, base).toUrl()).toBe('http://x/p?a=1&c=3');
+      expect(QueryBuilder.from('c=3', base).toUrl()).toBe('http://x/p?a=1&c=3');
+      expect(QueryBuilder.from({ c: 3 }, base).toUrl()).toBe('http://x/p?a=1&c=3');
+      expect(QueryBuilder.create({ a: 2 }, base).toObject()).toEqual({ a: 2 });
+      expect(QueryBuilder.create({ c: 3 }, base).delete('a').toUrl()).toBe('http://x/p?c=3');
+    });
+
+    it('clone is a faithful deep copy (F035)', () => {
+      const original = new QueryBuilder().add('d', new Date(0)).add('u', undefined).add('x', NaN).addObject('o', { k: 1 });
+      const copy = original.clone();
+
+      expect(copy.get('d')).toBeInstanceOf(Date);
+      expect(copy.get('d')).not.toBe(original.get('d'));
+      expect(copy.has('u')).toBe(true);
+      expect(Number.isNaN(copy.get('x'))).toBe(true);
+      expect(copy.toString()).toBe(original.toString());
+
+      (copy.get('o') as { k: number }).k = 2;
+      expect((original.get('o') as { k: number }).k).toBe(1);
+
+      const cyclic: Record<string, unknown> = { k: 1 };
+      cyclic.self = cyclic;
+      const cyclicCopy = new QueryBuilder().add('o', cyclic).clone().get('o') as Record<string, unknown>;
+      expect(cyclicCopy).not.toBe(cyclic);
+      expect(cyclicCopy.self).toBe(cyclicCopy);
+    });
+  });
+
+  // [F043] The documented `QueryBuilder<SearchParams>` must type-check (ts-jest fails this file otherwise).
+  describe('type parameter', () => {
+    interface SearchParams {
+      q: string;
+      page: number;
+    }
+
+    it('types toObject() and derived builders with the shape', () => {
+      const builder = new QueryBuilder<SearchParams>();
+      builder.add('q', 'search term').add('page', 1);
+      const params: SearchParams = builder.clone().pick('q', 'page').omit('zzz').toObject();
+      const page: number = builder.toObject().page;
+      expect(params).toEqual({ q: 'search term', page: 1 });
+      expect(page).toBe(1);
+    });
+
+    it('can be subclassed, merged and passed to callbacks', () => {
+      class Api<T extends object> extends QueryBuilder<T> {
+        addIf(key: string, value: unknown): this {
+          return value === undefined ? this : this.add(key, value);
+        }
+      }
+      const typed = new Api<SearchParams>().addIf('q', 'x').addIf('page', undefined);
+      let seen: SearchParams | undefined;
+      typed.when(true, (b) => {
+        seen = b.toObject();
+      });
+      expect(seen).toEqual({ q: 'x' });
+      expect(new QueryBuilder().merge(typed).toObject()).toEqual({ q: 'x' });
+      expect(QueryBuilder.from(typed).toObject()).toEqual({ q: 'x' });
+    });
+  });
 });

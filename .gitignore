@@ -44,3 +44,11 @@ temp/
 # Package lock files (using npm)
 yarn.lock
 pnpm-lock.yaml
+.temp_files/
+
+.wrongstack/
+!/.wrongstack/
+/.wrongstack/*
+!/.wrongstack/project.json
+
+.dfmt/

@@ -41,8 +41,9 @@ export function stringify(obj: unknown, options?: StringifyOptions): string {
     encode: shouldEncode,
     encoder,
     filter,
-    arrayFormat,
+    arrayFormat: configuredArrayFormat,
     arrayFormatSeparator,
+    indices,
     sort,
     serializeDate,
     format,
@@ -52,7 +53,18 @@ export function stringify(obj: unknown, options?: StringifyOptions): string {
     charset,
     charsetSentinel,
     comma,
+    commaRoundTrip,
   } = opts;
+
+  // [F024] `comma` / `indices` pick the array format unless arrayFormat is given explicitly.
+  let arrayFormat: ArrayFormat = configuredArrayFormat;
+  if (options?.arrayFormat === undefined) {
+    if (comma) {
+      arrayFormat = 'comma';
+    } else if (indices) {
+      arrayFormat = 'indices';
+    }
+  }
 
   let objToStringify = obj;
 
@@ -77,15 +89,15 @@ export function stringify(obj: unknown, options?: StringifyOptions): string {
     encode: shouldEncode,
     encoder: shouldEncode ? (str: string) => {
       if (typeof encoder === 'function') {
-        return encoder(str, (s: string) => encode(s, format), charset);
+        return encoder(str, (s: string) => encode(s, format, false, charset), charset);
       }
-      return encode(str, format);
+      return encode(str, format, false, charset);
     } : (str: string) => str,
     keyEncoder: shouldEncode ? (str: string) => {
       if (typeof encoder === 'function') {
-        return encoder(str, (s: string) => encode(s, format, true), charset);
+        return encoder(str, (s: string) => encode(s, format, true, charset), charset);
       }
-      return encode(str, format, true);
+      return encode(str, format, true, charset);
     } : (str: string) => str,
     arrayFormat,
     arrayFormatSeparator,
@@ -94,6 +106,7 @@ export function stringify(obj: unknown, options?: StringifyOptions): string {
     encodeValuesOnly,
     allowDots,
     comma,
+    commaRoundTrip,
     filter,
   });
 
@@ -137,6 +150,7 @@ function stringifyObject(
     encodeValuesOnly: boolean;
     allowDots: boolean;
     comma: boolean;
+    commaRoundTrip: boolean;
     encode: boolean;
     filter?: Array<string | number> | ((prefix: string, value: unknown) => unknown);
   }
@@ -152,6 +166,7 @@ function stringifyObject(
     encodeValuesOnly,
     allowDots,
     // comma, // unused in stringifyObject
+    commaRoundTrip,
     filter,
   } = options;
 
@@ -180,7 +195,8 @@ function stringifyObject(
       if (!strictNullHandling && !skipNulls) {
         const encodedKey = encodeValuesOnly ? fullKey : keyEncoder(fullKey);
         pairs.push(`${encodedKey}=`);
-      } else if (strictNullHandling) {
+      } else if (strictNullHandling && !skipNulls) {
+        // [F008] skipNulls wins over strictNullHandling.
         const encodedKey = encodeValuesOnly ? fullKey : keyEncoder(fullKey);
         pairs.push(encodedKey);
       }
@@ -203,8 +219,12 @@ function stringifyObject(
         continue;
       }
 
+      // [F040] commaRoundTrip: a one-element comma array keeps its "[]" so it parses back as an array.
+      const arrayKey =
+        arrayFormat === 'comma' && commaRoundTrip && value.length === 1 ? `${fullKey}[]` : fullKey;
+
       const arrayPairs = joinArrayFormat(
-        encodeValuesOnly ? fullKey : keyEncoder(fullKey),
+        encodeValuesOnly ? arrayKey : keyEncoder(arrayKey),
         arrayFormat === 'json' ? value : value.map((v) => stringifyValue(v, { encoder, serializeDate })),
         arrayFormat,
         arrayFormatSeparator
@@ -259,15 +279,16 @@ function stringifyValue(
     return '';
   }
 
+  // [F006] Every array element must be encoded, not only object elements.
   if (isValidDate(value)) {
-    return serializeDate(value);
+    return encoder(serializeDate(value));
   }
 
   if (typeof value === 'object') {
     return encoder(JSON.stringify(value));
   }
 
-  return String(value);
+  return encoder(String(value));
 }
 
 export function stringifyUrl(url: string, query: unknown, options?: StringifyOptions): string {
@@ -281,6 +302,10 @@ export function stringifyUrl(url: string, query: unknown, options?: StringifyOpt
     return url;
   }
 
-  const separator = url.indexOf('?') !== -1 ? '&' : '?';
-  return `${url}${separator}${queryString}`;
+  // [F025] The query belongs before the fragment.
+  const hashIndex = url.indexOf('#');
+  const base = hashIndex === -1 ? url : url.slice(0, hashIndex);
+  const fragment = hashIndex === -1 ? '' : url.slice(hashIndex);
+  const separator = base.indexOf('?') !== -1 ? '&' : '?';
+  return `${base}${separator}${queryString}${fragment}`;
 }

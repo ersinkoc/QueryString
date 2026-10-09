@@ -1,5 +1,6 @@
 import { SecurityOptions, ParsedQuery } from './types';
 import { getDepth, hasOwn } from './utils/object';
+import { parse } from './parser';
 
 const XSS_PATTERNS = [
   /<script[^>]*>.*?<\/script>/gi,
@@ -26,30 +27,36 @@ export function sanitizeInput(input: string, options: { aggressive?: boolean } =
   }
 
   let sanitized = input;
+  let previous: string;
 
-  // Extract content from script tags
-  sanitized = sanitized.replace(/<script[^>]*>(.*?)<\/script>/gi, '$1');
-  
-  // Remove other dangerous tags completely
-  sanitized = sanitized.replace(/<iframe[^>]*>.*?<\/iframe>/gi, '');
-  sanitized = sanitized.replace(/<embed[^>]*>/gi, '');
-  sanitized = sanitized.replace(/<object[^>]*>/gi, '');
-  sanitized = sanitized.replace(/<link[^>]*>/gi, '');
-  sanitized = sanitized.replace(/<style[^>]*>.*?<\/style>/gi, '');
-  
-  // Remove javascript: and vbscript: prefixes
-  sanitized = sanitized.replace(/javascript:/gi, '');
-  sanitized = sanitized.replace(/vbscript:/gi, '');
-  sanitized = sanitized.replace(/data:text\/html/gi, '');
-  
-  // Remove event handlers and their values completely
-  sanitized = sanitized.replace(/on\w+\s*=\s*[^>\s]*/gi, '');
+  // [F004] Repeat until stable: one pass lets 'javajavascript:script:' re-form the pattern.
+  do {
+    previous = sanitized;
 
-  if (options.aggressive) {
-    for (const pattern of SQL_INJECTION_PATTERNS) {
-      sanitized = sanitized.replace(pattern, '');
+    // Extract content from script tags
+    sanitized = sanitized.replace(/<script[^>]*>(.*?)<\/script>/gi, '$1');
+  
+    // Remove other dangerous tags completely
+    sanitized = sanitized.replace(/<iframe[^>]*>.*?<\/iframe>/gi, '');
+    sanitized = sanitized.replace(/<embed[^>]*>/gi, '');
+    sanitized = sanitized.replace(/<object[^>]*>/gi, '');
+    sanitized = sanitized.replace(/<link[^>]*>/gi, '');
+    sanitized = sanitized.replace(/<style[^>]*>.*?<\/style>/gi, '');
+  
+    // Remove javascript: and vbscript: prefixes
+    sanitized = sanitized.replace(/javascript:/gi, '');
+    sanitized = sanitized.replace(/vbscript:/gi, '');
+    sanitized = sanitized.replace(/data:text\/html/gi, '');
+  
+    // Remove event handlers and their values completely
+    sanitized = sanitized.replace(/on\w+\s*=\s*[^>\s]*/gi, '');
+
+    if (options.aggressive) {
+      for (const pattern of SQL_INJECTION_PATTERNS) {
+        sanitized = sanitized.replace(pattern, '');
+      }
     }
-  }
+  } while (sanitized !== previous);
 
   sanitized = sanitized
     .replace(/</g, '&lt;')
@@ -142,7 +149,14 @@ export function hasPrototypePollution(obj: unknown): boolean {
       // If the prototype has been modified, check for dangerous properties
       const protoProps = Object.getOwnPropertyNames(proto);
       for (const prop of protoProps) {
-        if (prop !== 'constructor' && typeof proto[prop] !== 'function') {
+        // [F032] Inspect data properties only; reading an accessor would execute it (and throws for Map/Set).
+        const descriptor = Object.getOwnPropertyDescriptor(proto, prop);
+        if (
+          prop !== 'constructor' &&
+          descriptor &&
+          'value' in descriptor &&
+          typeof descriptor.value !== 'function'
+        ) {
           return true; // Non-constructor property in prototype indicates pollution
         }
       }
@@ -243,6 +257,11 @@ function sanitizeObjectData(obj: unknown): unknown {
     return typeof obj === 'string' ? sanitizeInput(obj) : String(obj);
   }
 
+  // [F031] Dates are data, not containers; rebuilding them from their keys would yield {}.
+  if (obj instanceof Date) {
+    return obj;
+  }
+
   if (Array.isArray(obj)) {
     return obj.map((item) => sanitizeObjectData(item));
   }
@@ -251,6 +270,10 @@ function sanitizeObjectData(obj: unknown): unknown {
   for (const key in obj) {
     if (hasOwn(obj, key)) {
       const sanitizedKey = sanitizeInput(key);
+      // [F005] Plain assignment of '__proto__' would invoke the prototype setter; drop the key.
+      if (sanitizedKey === '__proto__') {
+        continue;
+      }
       sanitized[sanitizedKey] = sanitizeObjectData((obj as Record<string, unknown>)[key]);
     }
   }
@@ -259,9 +282,24 @@ function sanitizeObjectData(obj: unknown): unknown {
 }
 
 
-export function createSecureParser(baseParser: Function, securityOptions: SecurityOptions = {}) {
+type SecureParser = (input: string, options?: unknown) => ParsedQuery;
+type BaseParser = (input: string, options?: never) => unknown;
+
+export function createSecureParser(securityOptions?: SecurityOptions): SecureParser;
+export function createSecureParser(
+  baseParser: BaseParser,
+  securityOptions?: SecurityOptions
+): SecureParser;
+export function createSecureParser(
+  first: BaseParser | SecurityOptions = {},
+  second: SecurityOptions = {}
+): SecureParser {
+  // [F042] The documented call is createSecureParser(options): an options object uses the library's own parse().
+  const baseParser: BaseParser = typeof first === 'function' ? first : parse;
+  const securityOptions: SecurityOptions = typeof first === 'function' ? second : first;
+
   return function secureParser(input: string, options?: unknown): ParsedQuery {
-    let result = baseParser(input, options) as ParsedQuery;
+    let result = baseParser(input, options as never) as ParsedQuery;
     
     if (securityOptions.sanitize) {
       result = sanitizeObjectData(result) as ParsedQuery;

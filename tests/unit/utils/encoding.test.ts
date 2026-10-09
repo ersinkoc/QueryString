@@ -7,7 +7,8 @@ import {
   parseArrayValue,
   tryParseDate,
   getSafeKey,
-  compact
+  compact,
+  decodeLatin1,
 } from '../../../src/utils/encoding';
 
 describe('Encoding utilities', () => {
@@ -76,6 +77,14 @@ describe('Encoding utilities', () => {
       expect(decode('hello%2')).toBe('hello%2'); // incomplete encoding - returns original
       expect(decode('hello%ZZ')).toBe('hello%ZZ'); // invalid hex - returns original
       expect(decode('hello%')).toBe('hello%'); // incomplete encoding - returns original
+    });
+
+    it('still turns plus signs into spaces when another escape is malformed (F045)', () => {
+      expect(decode('x+y%zz')).toBe('x y%zz');
+      expect(decode('50%+off')).toBe('50% off');
+      expect(decode('a+b%2')).toBe('a b%2');
+      expect(decode('%41+%zz')).toBe('%41 %zz');
+      expect(decode('+')).toBe(' ');
     });
 
     it('should decode unicode characters', () => {
@@ -268,6 +277,62 @@ describe('Encoding utilities', () => {
 
     it('should handle mixed types', () => {
       expect(compact([1, null, 'string', undefined, true, 0])).toEqual([1, 'string', true, 0]);
+    });
+  });
+
+  describe('lone surrogates (audit F007)', () => {
+    it('rejects lone surrogates anywhere instead of swallowing the next character', () => {
+      expect(() => encode('\uD800x')).toThrow('Invalid UTF-8');
+      expect(() => encode('\uDC00x')).toThrow('Invalid UTF-8');
+      expect(() => encode('\uD800\uD800')).toThrow('Invalid UTF-8');
+      expect(() => encode('\uDC00\uD800')).toThrow('Invalid UTF-8');
+    });
+
+    it('still encodes valid surrogate pairs', () => {
+      expect(encode('\u{1F600}')).toBe('%F0%9F%98%80');
+      expect(encode('a\u{1F600}\u{1F600}')).toBe('a%F0%9F%98%80%F0%9F%98%80');
+    });
+  });
+
+  describe('impossible calendar dates (audit F027)', () => {
+    it('keeps impossible dates as strings instead of rolling them over', () => {
+      for (const text of ['2021-02-29', '2020-02-30', '2020-04-31', '2023-11-31', '2100-02-29', '2021-02-29T10:00:00Z']) {
+        expect(tryParseDate(text)).toBe(text);
+      }
+    });
+
+    it('still parses valid dates, including leap days', () => {
+      expect((tryParseDate('2020-02-29') as Date).toISOString()).toBe('2020-02-29T00:00:00.000Z');
+      expect((tryParseDate('2000-02-29') as Date).toISOString()).toBe('2000-02-29T00:00:00.000Z');
+      expect((tryParseDate('2020-12-31') as Date).toISOString()).toBe('2020-12-31T00:00:00.000Z');
+      expect((tryParseDate('2020-12-31T23:00:00-05:00') as Date).toISOString()).toBe('2021-01-01T04:00:00.000Z');
+    });
+  });
+
+  describe('iso-8859-1 (F038/F039)', () => {
+    it('encode() writes one byte up to U+00FF and a numeric reference beyond', () => {
+      expect(encode('é', 'RFC3986', false, 'iso-8859-1')).toBe('%E9');
+      expect(encode('ÿ', 'RFC3986', false, 'iso-8859-1')).toBe('%FF');
+      expect(encode('Ā', 'RFC3986', false, 'iso-8859-1')).toBe('%26%23256%3B');
+      expect(encode('\u{1F600}', 'RFC3986', false, 'iso-8859-1')).toBe('%26%23128512%3B');
+      expect(encode('a b', 'RFC1738', false, 'iso-8859-1')).toBe('a+b');
+      expect(encode('a[b]', 'RFC3986', true, 'iso-8859-1')).toBe('a[b]');
+      expect(encode('', 'RFC3986', false, 'iso-8859-1')).toBe('');
+      expect(encode('é')).toBe('%C3%A9');
+    });
+
+    it('encode() rejects lone surrogates', () => {
+      expect(() => encode('\ud800', 'RFC3986', false, 'iso-8859-1')).toThrow('Invalid UTF-8');
+      expect(() => encode('x\udc00', 'RFC3986', false, 'iso-8859-1')).toThrow('Invalid UTF-8');
+      expect(() => encode('\ud800x', 'RFC3986', false, 'iso-8859-1')).toThrow('Invalid UTF-8');
+    });
+
+    it('decodeLatin1() maps each %XX to one character and leaves bad escapes', () => {
+      expect(decodeLatin1('Jos%E9')).toBe('José');
+      expect(decodeLatin1('a+b%2b')).toBe('a b+');
+      expect(decodeLatin1('%C3%A9')).toBe('Ã©');
+      expect(decodeLatin1('100%zz%E')).toBe('100%zz%E');
+      expect(decodeLatin1('')).toBe('');
     });
   });
 });

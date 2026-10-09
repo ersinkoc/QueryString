@@ -32,22 +32,27 @@ import { QueryBuilder as _QueryBuilder } from './builder';
 import { q as _q, schema as _schema, validate as _validate, isValid as _isValid } from './schema';
 import { PluginManager } from './plugins';
 import { createSecureParser } from './security';
-import { ParseOptions, StringifyOptions } from './types';
+import { ParseOptions, ParsedQuery, StringifyOptions } from './types';
 
 const defaultPluginManager = new PluginManager();
 
 export const querystring = {
-  parse: (input: string, options?: ParseOptions & { plugins?: boolean | PluginManager }) => {
+  parse: <T extends object = ParsedQuery>(
+    input: string,
+    options?: ParseOptions & { plugins?: boolean | PluginManager }
+  ): T => {
     const { plugins, ...parseOptions } = options || {};
     const pluginManager = plugins === true ? defaultPluginManager : plugins instanceof PluginManager ? plugins : null;
     
     if (pluginManager) {
-      const processedInput = pluginManager.applyBeforeParse(input, parseOptions);
+      // [F018] beforeParse hooks are typed (input: string); non-string input stays graceful (-> {}).
+      const processedInput =
+        typeof input === 'string' ? pluginManager.applyBeforeParse(input, parseOptions) : input;
       const result = _parse(processedInput, parseOptions);
-      return pluginManager.applyAfterParse(result, parseOptions);
+      return pluginManager.applyAfterParse(result, parseOptions) as unknown as T;
     }
     
-    return _parse(input, parseOptions);
+    return _parse<T>(input, parseOptions);
   },
   
   stringify: (obj: unknown, options?: StringifyOptions & { plugins?: boolean | PluginManager }) => {
@@ -55,7 +60,11 @@ export const querystring = {
     const pluginManager = plugins === true ? defaultPluginManager : plugins instanceof PluginManager ? plugins : null;
     
     if (pluginManager) {
-      const processedObj = pluginManager.applyBeforeStringify(obj as any, stringifyOptions);
+      // [F036] beforeStringify hooks are typed (obj: ParsedQuery); null/primitive input stays graceful (-> '').
+      const processedObj =
+        obj !== null && typeof obj === 'object'
+          ? pluginManager.applyBeforeStringify(obj as any, stringifyOptions)
+          : obj;
       const result = _stringify(processedObj, stringifyOptions);
       return pluginManager.applyAfterStringify(result, stringifyOptions);
     }

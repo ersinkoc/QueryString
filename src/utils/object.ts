@@ -8,6 +8,20 @@ export function hasOwn(obj: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(obj, key);
 }
 
+// [F015] Store a key as plain data: assigning '__proto__' would rewrite the target's prototype.
+export function setOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === '__proto__') {
+    Object.defineProperty(target, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    return;
+  }
+  target[key] = value;
+}
+
 export function merge(target: Record<string, QueryValue>, source: Record<string, QueryValue>, options: { allowPrototypes?: boolean } = {}): Record<string, QueryValue> {
   if (!source) {
     return target;
@@ -42,14 +56,14 @@ export function merge(target: Record<string, QueryValue>, source: Record<string,
     if (hasOwn(mergeTarget, key)) {
       const targetValue = mergeTarget[key];
       if (Array.isArray(targetValue) && Array.isArray(value)) {
-        mergeTarget[key] = targetValue.concat(value);
+        setOwn(mergeTarget, key, targetValue.concat(value));
       } else if (isObject(targetValue) && isObject(value)) {
-        mergeTarget[key] = merge(targetValue as Record<string, QueryValue>, value as Record<string, QueryValue>, options);
+        setOwn(mergeTarget, key, merge(targetValue as Record<string, QueryValue>, value as Record<string, QueryValue>, options));
       } else {
-        mergeTarget[key] = value;
+        setOwn(mergeTarget, key, value);
       }
     } else {
-      mergeTarget[key] = value;
+      setOwn(mergeTarget, key, value);
     }
   });
 

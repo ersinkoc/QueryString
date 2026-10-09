@@ -13,6 +13,30 @@ import {
   NullableSchema,
   SchemaValidationResult,
 } from './types';
+import { hasOwn } from './utils/object';
+
+// [F029] `%` is wrong for fractional steps (0.3 % 0.1 === 0.0999...); compare the quotient to an integer.
+function isMultipleOf(value: number, step: number): boolean {
+  if (Number.isInteger(value) && Number.isInteger(step)) {
+    return value % step === 0;
+  }
+  const ratio = value / step;
+  return Number.isFinite(ratio) && Math.abs(ratio - Math.round(ratio)) < 1e-9;
+}
+
+// [F010] Plain assignment of '__proto__' would replace the target's prototype.
+function setOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === '__proto__') {
+    Object.defineProperty(target, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    return;
+  }
+  target[key] = value;
+}
 
 abstract class BaseSchemaImpl<T> implements BaseSchema<T> {
   abstract type: string;
@@ -115,6 +139,10 @@ class StringSchemaImpl extends BaseSchemaImpl<string> implements StringSchema {
     }
     if (this._max !== undefined && str.length > this._max) {
       throw new Error(`String must be at most ${this._max} characters`);
+    }
+    if (this._regex) {
+      // [F028] test() on a /g or /y RegExp advances lastIndex; start every validation from 0.
+      this._regex.lastIndex = 0;
     }
     if (this._regex && !this._regex.test(str)) {
       throw new Error(`String does not match pattern`);
@@ -222,6 +250,11 @@ class NumberSchemaImpl extends BaseSchemaImpl<number> implements NumberSchema {
       throw new Error(`Expected number, got ${typeof value}`);
     }
 
+    // [F009] Number() alone accepts null, '', '  ', [] and [5] as 0 / 5.
+    if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) {
+      throw new Error(`Expected number, got ${typeof value}`);
+    }
+
     const num = Number(value);
     if (isNaN(num)) {
       throw new Error(`Expected number, got ${typeof value}`);
@@ -248,7 +281,7 @@ class NumberSchemaImpl extends BaseSchemaImpl<number> implements NumberSchema {
     if (this._max !== undefined && num > this._max) {
       throw new Error(`Number must be at most ${this._max}`);
     }
-    if (this._multipleOf !== undefined && num % this._multipleOf !== 0) {
+    if (this._multipleOf !== undefined && !isMultipleOf(num, this._multipleOf)) {
       throw new Error(`Number must be a multiple of ${this._multipleOf}`);
     }
     if (this._finite && !Number.isFinite(num)) {
@@ -456,6 +489,8 @@ class ArraySchemaImpl<T> extends BaseSchemaImpl<T[]> implements ArraySchema<T> {
   }
 }
 
+type ObjectPolicySource = ObjectSchemaImpl<Record<string, unknown>>;
+
 class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl<T> implements ObjectSchema<T> {
   type = 'object' as const;
   private _shape?: Record<string, BaseSchema<unknown>>;
@@ -479,21 +514,24 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
     if (this._shape) {
       for (const [key, schema] of Object.entries(this._shape)) {
         try {
-          result[key] = schema.parse(input[key]);
+          // [F011] Object.prototype members (constructor, toString, ...) are not input.
+          result[key] = schema.parse(
+            hasOwn(input, key) || !(key in Object.prototype) ? input[key] : undefined
+          );
         } catch (error) {
           throw new Error(`Invalid value for key "${key}": ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
       }
 
       for (const key of Object.keys(input)) {
-        if (!(key in this._shape)) {
+        if (!hasOwn(this._shape, key)) {
           if (this._strict) {
             throw new Error(`Unknown key "${key}"`);
           } else if (this._passthrough) {
-            result[key] = input[key];
+            setOwn(result, key, input[key]);
           } else if (this._catchall) {
             try {
-              result[key] = this._catchall.parse(input[key]);
+              setOwn(result, key, this._catchall.parse(input[key]));
             } catch (error) {
               throw new Error(`Invalid value for key "${key}": ${error instanceof Error ? error.message : 'Unknown error'}`);
             }
@@ -501,11 +539,28 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
         }
       }
     } else {
-      Object.assign(result, input);
+      for (const key of Reflect.ownKeys(input)) {
+        if (Object.prototype.propertyIsEnumerable.call(input, key)) {
+          setOwn(result, key as string, input[key as string]);
+        }
+      }
     }
 
     this.applyRefinements(result as T);
     return this.applyTransforms(result as T);
+  }
+
+  // [F030] Derived schemas keep the unknown-key policy (strict / passthrough / catchall) of their source.
+  private derive<U extends Record<string, unknown>>(
+    shape: Record<string, BaseSchema<unknown>>,
+    policy: ObjectPolicySource = this as unknown as ObjectPolicySource
+  ): ObjectSchemaImpl<U> {
+    const schema = new ObjectSchemaImpl<U>();
+    schema._shape = shape;
+    schema._strict = policy._strict;
+    schema._passthrough = policy._passthrough;
+    schema._catchall = policy._catchall;
+    return schema;
   }
 
   shape<S extends Record<string, SchemaType>>(shape: S): ObjectSchema<{ [K in keyof S]: S[K] extends BaseSchema<infer U> ? U : never }> {
@@ -547,9 +602,7 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
       }
     }
 
-    const schema = new ObjectSchemaImpl<Pick<T, K>>();
-    schema._shape = newShape;
-    return schema;
+    return this.derive<Pick<T, K>>(newShape);
   }
 
   omit<K extends keyof T>(keys: K[]): ObjectSchema<Omit<T, K>> {
@@ -566,24 +619,20 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
       }
     }
 
-    const schema = new ObjectSchemaImpl<Omit<T, K>>();
-    schema._shape = newShape;
-    return schema;
+    return this.derive<Omit<T, K>>(newShape);
   }
 
   extend<S extends Record<string, SchemaType>>(extension: S): ObjectSchema<T & { [K in keyof S]: S[K] extends BaseSchema<infer U> ? U : never }> {
     const newShape = { ...(this._shape || {}), ...extension };
-    const schema = new ObjectSchemaImpl<T & { [K in keyof S]: S[K] extends BaseSchema<infer U> ? U : never }>();
-    schema._shape = newShape as any;
-    return schema;
+    return this.derive<T & { [K in keyof S]: S[K] extends BaseSchema<infer U> ? U : never }>(
+      newShape as Record<string, BaseSchema<unknown>>
+    );
   }
 
   merge<S extends Record<string, unknown>>(other: ObjectSchema<S>): ObjectSchema<T & S> {
     const otherImpl = other as ObjectSchemaImpl<S>;
     const newShape = { ...(this._shape || {}), ...(otherImpl._shape || {}) };
-    const schema = new ObjectSchemaImpl<T & S>();
-    schema._shape = newShape;
-    return schema;
+    return this.derive<T & S>(newShape, otherImpl as unknown as ObjectPolicySource);
   }
 
   partial(): ObjectSchema<Partial<T>> {
@@ -596,9 +645,7 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
       newShape[key] = value.optional();
     }
 
-    const schema = new ObjectSchemaImpl<Partial<T>>();
-    schema._shape = newShape;
-    return schema;
+    return this.derive<Partial<T>>(newShape);
   }
 
   deepPartial(): ObjectSchema<DeepPartial<T>> {

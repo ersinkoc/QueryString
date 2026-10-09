@@ -1,4 +1,66 @@
 import { QueryStringPlugin, ParseOptions, StringifyOptions, ParsedQuery } from './types';
+import { combineArrayValues } from './utils/array';
+import { hasOwn } from './utils/object';
+
+// [F012] Plain assignment of '__proto__' would replace the output object's prototype.
+function setKey(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === '__proto__') {
+    Object.defineProperty(target, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    return;
+  }
+  target[key] = value;
+}
+
+// [F014] btoa/atob are Latin-1 only; route text through its UTF-8 bytes.
+function utf8ToBinary(text: string): string {
+  const TextEncoderCtor = (
+    globalThis as unknown as { TextEncoder?: new () => { encode(input: string): Uint8Array } }
+  ).TextEncoder;
+  if (typeof TextEncoderCtor !== 'function') {
+    return text;
+  }
+  let binary = '';
+  for (const byte of new TextEncoderCtor().encode(text)) {
+    binary += String.fromCharCode(byte);
+  }
+  return binary;
+}
+
+function binaryToUtf8(binary: string): string {
+  const TextDecoderCtor = (
+    globalThis as unknown as {
+      TextDecoder?: new (
+        label: string,
+        options: { fatal: boolean }
+      ) => { decode(input: Uint8Array): string };
+    }
+  ).TextDecoder;
+  if (typeof TextDecoderCtor !== 'function') {
+    return binary;
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoderCtor('utf-8', { fatal: true }).decode(bytes);
+}
+
+type QueryEntry = ParsedQuery[string];
+
+// [F037] Keys that collide after lowercasing are combined like repeated keys instead of overwriting each other.
+function setLowercased(target: Record<string, unknown>, key: string, value: unknown): void {
+  const lower = key.toLowerCase();
+  if (hasOwn(target, lower)) {
+    setKey(target, lower, combineArrayValues(target[lower] as QueryEntry, value as QueryEntry));
+  } else {
+    setKey(target, lower, value);
+  }
+}
 
 export class PluginManager {
   private plugins: Map<string, QueryStringPlugin> = new Map();
@@ -116,7 +178,7 @@ export const sortKeysPlugin = createPlugin({
     const keys = Object.keys(obj).sort();
     
     for (const key of keys) {
-      sorted[key] = obj[key];
+      setKey(sorted, key, obj[key]);
     }
     
     return sorted;
@@ -129,7 +191,7 @@ export const lowercaseKeysPlugin = createPlugin({
     const transformed: ParsedQuery = {};
     
     for (const [key, value] of Object.entries(result)) {
-      transformed[key.toLowerCase()] = value;
+      setLowercased(transformed, key, value);
     }
     
     return transformed;
@@ -138,7 +200,7 @@ export const lowercaseKeysPlugin = createPlugin({
     const transformed: ParsedQuery = {};
     
     for (const [key, value] of Object.entries(obj)) {
-      transformed[key.toLowerCase()] = value;
+      setLowercased(transformed, key, value);
     }
     
     return transformed;
@@ -155,7 +217,7 @@ export const filterEmptyPlugin = createPlugin({
         if (Array.isArray(value) && value.length === 0) {
           continue;
         }
-        filtered[key] = value;
+        setKey(filtered, key, value);
       }
     }
     
@@ -168,7 +230,7 @@ export const base64Plugin = createPlugin({
   afterStringify: (result: string): string => {
     const globalObj = globalThis as any;
     if (typeof globalObj.btoa === 'function') {
-      return globalObj.btoa(result);
+      return globalObj.btoa(utf8ToBinary(result));
     }
     // Node.js environment
     return globalObj.Buffer?.from(result).toString('base64') || result;
@@ -181,7 +243,7 @@ export const base64Plugin = createPlugin({
         const decoded = globalObj.atob(input);
         const reencoded = globalObj.btoa(decoded);
         if (reencoded.replace(/=+$/, '') === input.replace(/=+$/, '')) {
-          return decoded;
+          return binaryToUtf8(decoded);
         }
         return input;
       }
@@ -246,10 +308,11 @@ function normalizeValues(obj: unknown): any {
     return obj.map(normalizeValues);
   }
 
-  if (typeof obj === 'object') {
+  // [F013] Only plain data is normalized; Dates and other instances pass through untouched.
+  if (typeof obj === 'object' && !(obj instanceof Date)) {
     const normalized: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
-      normalized[key] = normalizeValues(value);
+      setKey(normalized, key, normalizeValues(value));
     }
     return normalized;
   }

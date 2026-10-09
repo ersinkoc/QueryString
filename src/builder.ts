@@ -1,9 +1,38 @@
 import { QueryBuilderOptions, ParsedQuery, StringifyOptions, QueryValue, Primitive } from './types';
 import { stringify, stringifyUrl } from './stringifier';
 import { parse, parseUrl } from './parser';
-import { isObject, merge } from './utils/object';
+import { hasOwn, isObject, merge, setOwn } from './utils/object';
 
-export class QueryBuilder {
+// [F035] Faithful deep copy (JSON round trips turn Dates into strings and drop undefined / NaN).
+function cloneValue(value: unknown, seen: WeakMap<object, unknown> = new WeakMap()): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (value instanceof Date) {
+    return new Date(value.getTime());
+  }
+  if (seen.has(value)) {
+    return seen.get(value);
+  }
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    seen.set(value, copy);
+    for (const item of value) {
+      copy.push(cloneValue(item, seen));
+    }
+    return copy;
+  }
+  const copy: Record<string, unknown> =
+    Object.getPrototypeOf(value) === null ? Object.create(null) : {};
+  seen.set(value, copy);
+  for (const key of Object.keys(value)) {
+    setOwn(copy, key, cloneValue((value as Record<string, unknown>)[key], seen));
+  }
+  return copy;
+}
+
+// [F043] Shape is the documented `QueryBuilder<SearchParams>` type parameter; it types toObject() and derived builders.
+export class QueryBuilder<Shape extends object = ParsedQuery> {
   private query: ParsedQuery = {};
   private options: QueryBuilderOptions;
 
@@ -15,28 +44,30 @@ export class QueryBuilder {
     }
   }
 
-  static from(input: string | ParsedQuery | QueryBuilder, options?: QueryBuilderOptions): QueryBuilder {
+  static from(input: string | ParsedQuery | QueryBuilder<object>, options?: QueryBuilderOptions): QueryBuilder {
     const builder = new QueryBuilder(options);
     
     if (typeof input === 'string') {
-      builder.query = parse(input, options);
+      builder.query = { ...builder.query, ...parse(input, options) };
     } else if (input instanceof QueryBuilder) {
       builder.query = { ...input.query };
       builder.options = { ...input.options, ...options };
     } else if (isObject(input)) {
-      builder.query = { ...input };
+      builder.query = { ...builder.query, ...input };
     }
     
     return builder;
   }
 
   add(key: string, value: unknown): this {
-    this.query[key] = value as QueryValue;
+    setOwn(this.query, key, value as QueryValue);
     return this;
   }
 
   addMultiple(obj: Record<string, unknown>): this {
-    Object.assign(this.query, obj);
+    for (const key of Object.keys(obj)) {
+      setOwn(this.query, key, obj[key]);
+    }
     return this;
   }
 
@@ -44,7 +75,7 @@ export class QueryBuilder {
     if (!Array.isArray(values)) {
       throw new TypeError('Values must be an array');
     }
-    this.query[key] = values as Primitive[];
+    setOwn(this.query, key, values as Primitive[]);
     return this;
   }
 
@@ -52,19 +83,20 @@ export class QueryBuilder {
     if (!isObject(obj)) {
       throw new TypeError('Value must be an object');
     }
-    this.query[key] = obj as { [key: string]: QueryValue };
+    setOwn(this.query, key, obj as { [key: string]: QueryValue });
     return this;
   }
 
   append(key: string, value: unknown): this {
-    const existing = this.query[key];
+    const existing = hasOwn(this.query, key) ? this.query[key] : undefined;
     
     if (existing === undefined) {
-      this.query[key] = value as QueryValue;
+      setOwn(this.query, key, value as QueryValue);
     } else if (Array.isArray(existing)) {
-      existing.push(value as Primitive);
+      // [F017] Copy instead of push: the array may be shared with the caller or another builder.
+      setOwn(this.query, key, [...existing, value as Primitive]);
     } else {
-      this.query[key] = [existing as Primitive, value as Primitive];
+      setOwn(this.query, key, [existing as Primitive, value as Primitive]);
     }
     
     return this;
@@ -75,11 +107,11 @@ export class QueryBuilder {
   }
 
   get(key: string): unknown {
-    return this.query[key];
+    return hasOwn(this.query, key) ? this.query[key] : undefined;
   }
 
   has(key: string): boolean {
-    return key in this.query;
+    return hasOwn(this.query, key);
   }
 
   delete(key: string): this {
@@ -104,14 +136,14 @@ export class QueryBuilder {
     return Object.entries(this.query);
   }
 
-  forEach(callback: (value: unknown, key: string, builder: QueryBuilder) => void): this {
+  forEach(callback: (value: unknown, key: string, builder: QueryBuilder<Shape>) => void): this {
     for (const [key, value] of this.entries()) {
       callback(value, key, this);
     }
     return this;
   }
 
-  map<T>(callback: (value: unknown, key: string, builder: QueryBuilder) => T): T[] {
+  map<T>(callback: (value: unknown, key: string, builder: QueryBuilder<Shape>) => T): T[] {
     const results: T[] = [];
     this.forEach((value, key) => {
       results.push(callback(value, key, this));
@@ -119,8 +151,10 @@ export class QueryBuilder {
     return results;
   }
 
-  filter(predicate: (value: unknown, key: string, builder: QueryBuilder) => boolean): QueryBuilder {
-    const filtered = new QueryBuilder(this.options);
+  filter(
+    predicate: (value: unknown, key: string, builder: QueryBuilder<Shape>) => boolean
+  ): QueryBuilder<Shape> {
+    const filtered = this.emptyCopy();
     
     this.forEach((value, key) => {
       if (predicate(value, key, this)) {
@@ -131,7 +165,7 @@ export class QueryBuilder {
     return filtered;
   }
 
-  merge(other: string | ParsedQuery | QueryBuilder): this {
+  merge(other: string | ParsedQuery | QueryBuilder<object>): this {
     let otherQuery: ParsedQuery;
     
     if (typeof other === 'string') {
@@ -146,10 +180,17 @@ export class QueryBuilder {
     return this;
   }
 
-  clone(): QueryBuilder {
-    const cloned = new QueryBuilder(this.options);
-    cloned.query = JSON.parse(JSON.stringify(this.query));
+  clone(): QueryBuilder<Shape> {
+    const cloned = this.emptyCopy();
+    cloned.query = cloneValue(this.query) as ParsedQuery;
     return cloned;
+  }
+
+  // [F033] The constructor seeds the query from options.baseUrl; derived builders must start empty.
+  private emptyCopy(): QueryBuilder<Shape> {
+    const copy = new QueryBuilder<Shape>(this.options);
+    copy.query = {};
+    return copy;
   }
 
   isEmpty(): boolean {
@@ -160,8 +201,8 @@ export class QueryBuilder {
     return Object.keys(this.query).length;
   }
 
-  toObject(): ParsedQuery {
-    return { ...this.query };
+  toObject(): Shape {
+    return { ...this.query } as unknown as Shape;
   }
 
   toString(options?: StringifyOptions): string {
@@ -169,7 +210,8 @@ export class QueryBuilder {
   }
 
   toUrl(url?: string, options?: StringifyOptions): string {
-    const baseUrl = url || this.options.baseUrl;
+    // [F016] options.baseUrl's own query string was already loaded into this.query by the constructor.
+    const baseUrl = url || this.options.baseUrl?.split('?')[0];
     
     if (!baseUrl) {
       throw new Error('No base URL provided');
@@ -186,8 +228,8 @@ export class QueryBuilder {
     return this.toUrl(url, options);
   }
 
-  pick(...keys: string[]): QueryBuilder {
-    const picked = new QueryBuilder(this.options);
+  pick(...keys: string[]): QueryBuilder<Shape> {
+    const picked = this.emptyCopy();
     
     for (const key of keys) {
       if (this.has(key)) {
@@ -198,8 +240,8 @@ export class QueryBuilder {
     return picked;
   }
 
-  omit(...keys: string[]): QueryBuilder {
-    const omitted = new QueryBuilder(this.options);
+  omit(...keys: string[]): QueryBuilder<Shape> {
+    const omitted = this.emptyCopy();
     const keySet = new Set(keys);
     
     this.forEach((value, key) => {
@@ -228,7 +270,10 @@ export class QueryBuilder {
     return this;
   }
 
-  when(condition: boolean | ((builder: QueryBuilder) => boolean), callback: (builder: QueryBuilder) => void): this {
+  when(
+    condition: boolean | ((builder: QueryBuilder<Shape>) => boolean),
+    callback: (builder: QueryBuilder<Shape>) => void
+  ): this {
     const shouldExecute = typeof condition === 'function' ? condition(this) : condition;
     
     if (shouldExecute) {
@@ -238,14 +283,17 @@ export class QueryBuilder {
     return this;
   }
 
-  unless(condition: boolean | ((builder: QueryBuilder) => boolean), callback: (builder: QueryBuilder) => void): this {
+  unless(
+    condition: boolean | ((builder: QueryBuilder<Shape>) => boolean),
+    callback: (builder: QueryBuilder<Shape>) => void
+  ): this {
     return this.when(
       typeof condition === 'function' ? (builder) => !condition(builder) : !condition,
       callback
     );
   }
 
-  tap(callback: (builder: QueryBuilder) => void): this {
+  tap(callback: (builder: QueryBuilder<Shape>) => void): this {
     callback(this);
     return this;
   }
@@ -257,7 +305,7 @@ export class QueryBuilder {
   static create(query?: ParsedQuery, options?: QueryBuilderOptions): QueryBuilder {
     const builder = new QueryBuilder(options);
     if (query) {
-      builder.query = { ...query };
+      builder.query = { ...builder.query, ...query };
     }
     return builder;
   }
