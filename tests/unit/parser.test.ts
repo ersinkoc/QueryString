@@ -277,6 +277,26 @@ describe('Parser', () => {
       expect(parse('a=x,y', { comma: true, parseArrays: false })).toEqual({ a: 'x,y' });
     });
 
+    it('splits comma / separator arrays on the raw value, then decodes and coerces each element (F046)', () => {
+      const comma = { arrayFormat: 'comma' } as const;
+      const sep = { arrayFormat: 'separator', arrayFormatSeparator: '|' } as const;
+      expect(parse('a=x%2Cy', comma)).toEqual({ a: 'x,y' });
+      expect(parse('a=a%2Cb,c', comma)).toEqual({ a: ['a,b', 'c'] });
+      expect(parse('a=a%7Cb|c', sep)).toEqual({ a: ['a|b', 'c'] });
+      expect(parse('a=%20x,y%20', comma)).toEqual({ a: [' x', 'y '] });
+      expect(parse('a=x , y', comma)).toEqual({ a: ['x', 'y'] });
+      expect(parse('a=1,2,true', { ...comma, parseNumbers: true, parseBooleans: true })).toEqual({ a: [1, 2, true] });
+      expect(parse('a=x%2Cy,z', { ...comma, decode: false })).toEqual({ a: ['x%2Cy', 'z'] });
+      expect(parse('a=x,y', { ...comma, decoder: (s: string) => s.toUpperCase() })).toEqual({ A: ['X', 'Y'] });
+      expect(parse('a=,', comma)).toEqual({ a: ['', ''] });
+    });
+
+    it('parses a one-element bracket-separator array back as an array (F046)', () => {
+      const bsep = { arrayFormat: 'bracket-separator', arrayFormatSeparator: '|' } as const;
+      expect(parse('a[]=x', bsep)).toEqual({ a: ['x'] });
+      expect(parse('a[]=x|y', bsep)).toEqual({ a: ['x', 'y'] });
+    });
+
     it('parses a[] as an array under the comma format so commaRoundTrip round-trips (F040)', () => {
       expect(parse('a[]=x', { arrayFormat: 'comma' })).toEqual({ a: ['x'] });
       expect(parse('a[]=x,y', { arrayFormat: 'comma' })).toEqual({ a: ['x', 'y'] });
@@ -435,6 +455,106 @@ describe('Parser', () => {
     it('does not treat a "?" inside the fragment as a query', () => {
       expect(parseUrl('http://x.com/p#frag?a=1')).toEqual({ url: 'http://x.com/p#frag?a=1', query: {} });
       expect(parseUrl('http://x.com/p?a=1#frag?x=2')).toEqual({ url: 'http://x.com/p', query: { a: '1' } });
+    });
+  });
+
+  describe('undefined options mean "not set" (F056)', () => {
+    const many = Array.from({ length: 1500 }, (_, i) => `k${i}=1`).join('&');
+
+    it('keeps the default limits and decoding when an option is explicitly undefined', () => {
+      expect(parse('a[b][c][d][e][f][g][h]=1', { depth: undefined })).toEqual({ a: { b: { c: { d: { e: {} } } } } });
+      expect(() => parse(many, { parameterLimit: undefined })).toThrow('Parameter limit exceeded');
+      expect(parse('a=%C3%A9', { decode: undefined })).toEqual({ a: 'é' });
+      expect(parse('a=1&b=2', { delimiter: undefined })).toEqual({ a: '1', b: '2' });
+      expect(parse('a=1&a=2', { duplicates: undefined })).toEqual({ a: ['1', '2'] });
+      expect(parse('a=1', null as never)).toEqual({ a: '1' });
+    });
+
+    it('still honours explicit false / zero values and does not mutate the options', () => {
+      expect(parse('a=%C3%A9', { decode: false })).toEqual({ a: '%C3%A9' });
+      expect(parse('a[b]=1', { depth: 0 })).toEqual({});
+      const options = { depth: undefined as number | undefined, allowDots: true };
+      parse('a.b=1', options);
+      expect(Object.keys(options)).toEqual(['depth', 'allowDots']);
+    });
+  });
+
+  describe('allowDots keeps bracket notation; parseArrays:false makes indices plain keys (F062, F063)', () => {
+    const dots = { allowDots: true } as const;
+    const off = { parseArrays: false } as const;
+
+    it('nests both a.b and a[b] (and mixtures) with allowDots (F062)', () => {
+      expect(parse('a[b]=1', dots)).toEqual({ a: { b: '1' } });
+      expect(parse('a[b][c]=1', dots)).toEqual({ a: { b: { c: '1' } } });
+      expect(parse('a[b].c=1', dots)).toEqual({ a: { b: { c: '1' } } });
+      expect(parse('a.b[c]=1', dots)).toEqual({ a: { b: { c: '1' } } });
+      expect(parse('a[0]=1&a[1]=2', dots)).toEqual({ a: ['1', '2'] });
+      expect(parse('a%5Bb%5D=1', dots)).toEqual({ a: { b: '1' } });
+      expect(parse('a[b.c]=1', dots)).toEqual({ a: { 'b.c': '1' } });
+      expect(parse('a[b=1', dots)).toEqual({ 'a[b': '1' });
+      expect(parse('a..b=1', dots)).toEqual({ a: { '': { b: '1' } } });
+      expect(parse('a.=1', dots)).toEqual({ a: { '': '1' } });
+      expect(parse('a.b=1')).toEqual({ 'a.b': '1' });
+    });
+
+    it('treats bracket indices as object keys when parseArrays is false (F063)', () => {
+      expect(parse('a[0]=1&a[1]=2', off)).toEqual({ a: { 0: '1', 1: '2' } });
+      expect(parse('a[]=1&a[]=2', off)).toEqual({ a: { 0: '1', 1: '2' } });
+      expect(parse('a[0][b]=1&a[1][b]=2', off)).toEqual({ a: { 0: { b: '1' }, 1: { b: '2' } } });
+      expect(parse('a.0=x&a.1=y', { ...off, allowDots: true })).toEqual({ a: { 0: 'x', 1: 'y' } });
+      expect(parse('a[]=1&b[]=2&a[]=3', off)).toEqual({ a: { 0: '1', 1: '3' }, b: { 0: '2' } });
+      expect(parse('a=1&a=2', off)).toEqual({ a: ['1', '2'] });
+      expect(parse('a[0]=1&a[1]=2')).toEqual({ a: ['1', '2'] });
+    });
+  });
+
+  describe('allowPrototypes (F064)', () => {
+    it('drops pairs whose keys would shadow Object.prototype methods', () => {
+      const result = parse('hasOwnProperty=1&toString=2&valueOf=3&a=4') as Record<string, unknown>;
+      expect(Object.keys(result)).toEqual(['a']);
+      expect(typeof result.hasOwnProperty).toBe('function');
+      expect(parse('a[hasOwnProperty][x]=1&a[toString]=2&a[ok]=3')).toEqual({ a: { ok: '3' } });
+      expect(parse('a.valueOf.b=1&a.ok=2', { allowDots: true })).toEqual({ a: { ok: '2' } });
+      expect(parse('myToString=1&hasOwnProperty2=2')).toEqual({ myToString: '1', hasOwnProperty2: '2' });
+      expect(parse('a=1&toString=x&a=2')).toEqual({ a: ['1', '2'] });
+    });
+
+    it('keeps __proto__ / constructor / prototype inert for the security layer, and honours the opt-outs', () => {
+      const inert = parse('__proto__=x&constructor=1&prototype=2&a=3') as Record<string, unknown>;
+      expect(Object.keys(inert)).toEqual(['__proto__', 'constructor', 'prototype', 'a']);
+      expect(Object.getPrototypeOf(inert)).toBe(Object.prototype);
+      expect(Object.keys(parse('hasOwnProperty=1&toString=2', { allowPrototypes: true }))).toEqual(['hasOwnProperty', 'toString']);
+      expect(Object.keys(parse('hasOwnProperty=1&toString=2', { plainObjects: true }))).toEqual(['hasOwnProperty', 'toString']);
+      expect(() => parse('toString=1&valueOf=2&a=3', { parameterLimit: 2 })).toThrow('Parameter limit exceeded');
+    });
+  });
+
+  describe('repeated keys are linear (F065)', () => {
+    it('keeps concat semantics when appending duplicates in place', () => {
+      expect(parse('a=1&a=2&a=3&a=4')).toEqual({ a: ['1', '2', '3', '4'] });
+      expect(parse('a=1,2&a=3&a=4,5', { arrayFormat: 'comma' })).toEqual({ a: ['1', '2', '3', '4', '5'] });
+      expect(parse('a[]=1&a=2', { arrayFormat: 'brackets' })).toEqual({ a: ['1', '2'] });
+      expect(parse('a=1&a[]=2', { arrayFormat: 'brackets' })).toEqual({ a: ['1', '2'] });
+      expect(parse('o[k]=1&o[k]=2&o[k]=3')).toEqual({ o: { k: ['1', '2', '3'] } });
+      expect(parse('a=1&b=x&a=2&b=y')).toEqual({ a: ['1', '2'], b: ['x', 'y'] });
+      const first = parse('a=1&a=2') as { a: string[] };
+      first.a.push('x');
+      expect(parse('a=1&a=2')).toEqual({ a: ['1', '2'] });
+    });
+
+    it('parses 40,000 repeated pairs quickly', () => {
+      const query = Array.from({ length: 40000 }, (_, i) => `a=${i}`).join('&');
+      const started = Date.now();
+      const result = parse(query, { parameterLimit: Infinity }) as { a: string[] };
+      expect(result.a).toHaveLength(40000);
+      expect(Date.now() - started).toBeLessThan(800);
+    });
+  });
+
+  describe('date-prefixed text (audit F072)', () => {
+    it('keeps non-ISO text a string with parseDates', () => {
+      expect(parse('d=2020-01-02%20Mar', { parseDates: true })).toEqual({ d: '2020-01-02 Mar' });
+      expect(parse('d=2020-01-02%20(note)', { parseDates: true })).toEqual({ d: '2020-01-02 (note)' });
     });
   });
 });

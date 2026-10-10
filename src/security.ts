@@ -1,18 +1,20 @@
 import { SecurityOptions, ParsedQuery } from './types';
-import { getDepth, hasOwn } from './utils/object';
+import { hasOwn, jsonText } from './utils/object';
 import { parse } from './parser';
 
+// [F054] An opening <script>/<iframe>/<style> tag is enough: a closing tag on the same line is not required.
+// [F055] Event handlers and data: URIs must start at a word boundary ("options=", "metadata:" are ordinary text).
 const XSS_PATTERNS = [
-  /<script[^>]*>.*?<\/script>/gi,
-  /<iframe[^>]*>.*?<\/iframe>/gi,
+  /<script\b/gi,
+  /<iframe\b/gi,
   /javascript:/gi,
-  /on\w+\s*=/gi,
+  /\bon\w+\s*=/gi,
   /<embed[^>]*>/gi,
   /<object[^>]*>/gi,
   /<link[^>]*>/gi,
-  /<style[^>]*>.*?<\/style>/gi,
+  /<style\b/gi,
   /vbscript:/gi,
-  /data:[^,]*,/gi,
+  /\bdata:[^,]*,/gi,
 ];
 
 const SQL_INJECTION_PATTERNS = [
@@ -20,6 +22,43 @@ const SQL_INJECTION_PATTERNS = [
   /(-{2}|\/\*|\*\/)/g,
   /[';]/g, // Remove quotes and semicolons
 ];
+
+// [F066] The validators below recurse; a runaway (very deep or circular) value must be reported, not crash them with a RangeError.
+const DEPTH_PROBE_LIMIT = 1000;
+
+// Depth of `value` measured with bounded recursion: exact up to `limit`, otherwise some number greater than `limit`.
+function boundedDepth(value: unknown, limit: number, current = 0): number {
+  if (value === null || typeof value !== 'object') {
+    return current;
+  }
+  if (current > limit) {
+    return current;
+  }
+
+  let max = current;
+  const children: unknown[] = Array.isArray(value)
+    ? value
+    : Object.keys(value).map((key) => (value as Record<string, unknown>)[key]);
+  for (const child of children) {
+    const depth = boundedDepth(child, limit, current + 1);
+    if (depth > max) {
+      max = depth;
+    }
+    if (max > limit) {
+      return max;
+    }
+  }
+
+  return max;
+}
+
+function runawayDepthMessage(maxDepth: number): string {
+  return `Object too deep: over ${Math.max(maxDepth, DEPTH_PROBE_LIMIT)} levels (max: ${maxDepth})`;
+}
+
+function isRunaway(value: unknown, maxDepth: number): boolean {
+  return boundedDepth(value, Math.max(maxDepth, DEPTH_PROBE_LIMIT)) > Math.max(maxDepth, DEPTH_PROBE_LIMIT);
+}
 
 export function sanitizeInput(input: string, options: { aggressive?: boolean } = {}): string {
   if (!input || typeof input !== 'string') {
@@ -49,7 +88,7 @@ export function sanitizeInput(input: string, options: { aggressive?: boolean } =
     sanitized = sanitized.replace(/data:text\/html/gi, '');
   
     // Remove event handlers and their values completely
-    sanitized = sanitized.replace(/on\w+\s*=\s*[^>\s]*/gi, '');
+    sanitized = sanitized.replace(/\bon\w+\s*=\s*[^>\s]*/gi, '');
 
     if (options.aggressive) {
       for (const pattern of SQL_INJECTION_PATTERNS) {
@@ -81,12 +120,16 @@ export function validateSecurity(
 
   const errors: string[] = [];
 
+  if (isRunaway(obj, maxDepth)) {
+    return { valid: false, errors: [runawayDepthMessage(maxDepth)] };
+  }
+
   const keyCount = countKeys(obj);
   if (keyCount > maxKeys) {
     errors.push(`Too many keys: ${keyCount} (max: ${maxKeys})`);
   }
 
-  const depth = getDepth(obj);
+  const depth = boundedDepth(obj, Math.max(maxDepth, DEPTH_PROBE_LIMIT));
   if (depth > maxDepth) {
     errors.push(`Object too deep: ${depth} levels (max: ${maxDepth})`);
   }
@@ -162,7 +205,8 @@ export function hasPrototypePollution(obj: unknown): boolean {
       }
     }
     
-    // Check own properties for dangerous keys (including non-enumerable ones)
+    // Check own properties for dangerous keys (including non-enumerable ones).
+    // [F067] This list already contains every own enumerable key; a second walk over them doubled the work at each nesting level (O(2^depth)).
     const allKeys = Object.getOwnPropertyNames(obj);
     for (const key of allKeys) {
       if (dangerousKeys.includes(key)) {
@@ -170,18 +214,6 @@ export function hasPrototypePollution(obj: unknown): boolean {
       }
       if (hasPrototypePollution((obj as Record<string, unknown>)[key])) {
         return true;
-      }
-    }
-    
-    // Also check enumerable properties
-    for (const key in obj) {
-      if (hasOwn(obj, key)) {
-        if (dangerousKeys.includes(key)) {
-          return true;
-        }
-        if (hasPrototypePollution((obj as Record<string, unknown>)[key])) {
-          return true;
-        }
       }
     }
   }
@@ -236,6 +268,11 @@ function containsXSS(str: string): boolean {
 
 export function secureStringify(obj: unknown, options: SecurityOptions = {}): string {
   let processedObj = obj;
+
+  const maxDepth = options.maxDepth ?? 10;
+  if (isRunaway(obj, maxDepth)) {
+    throw new Error(`Security validation failed: ${runawayDepthMessage(maxDepth)}`);
+  }
   
   if (options.sanitize) {
     // First sanitize the object
@@ -249,7 +286,7 @@ export function secureStringify(obj: unknown, options: SecurityOptions = {}): st
     throw new Error(`Security validation failed: ${validation.errors.join(', ')}`);
   }
 
-  return JSON.stringify(processedObj);
+  return jsonText(processedObj);
 }
 
 function sanitizeObjectData(obj: unknown): unknown {
@@ -300,6 +337,11 @@ export function createSecureParser(
 
   return function secureParser(input: string, options?: unknown): ParsedQuery {
     let result = baseParser(input, options as never) as ParsedQuery;
+
+    const maxDepth = securityOptions.maxDepth ?? 10;
+    if (isRunaway(result, maxDepth)) {
+      throw new Error(`Security validation failed: ${runawayDepthMessage(maxDepth)}`);
+    }
     
     if (securityOptions.sanitize) {
       result = sanitizeObjectData(result) as ParsedQuery;

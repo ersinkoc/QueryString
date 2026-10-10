@@ -110,8 +110,7 @@ const apiUrl = buildApiUrl('/users', {
   active: true,
   departments: ['engineering', 'product']
 }, {
-  arrayFormat: 'comma',
-  parseBooleans: true
+  arrayFormat: 'comma'
 });
 console.log('\n=== Generic API URL ===');
 console.log('API URL:', apiUrl);

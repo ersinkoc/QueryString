@@ -3,6 +3,8 @@ import {
   hasOwn,
   merge,
   assignSymbols,
+  withOptions,
+  jsonText,
   toPlainObject,
   getDepth,
   flattenObject,
@@ -352,4 +354,28 @@ describe('Object utilities', () => {
       });
     });
   });
+
+describe('withOptions (F056)', () => {
+  it('overlays defined options and ignores undefined ones without mutating the inputs', () => {
+    const base = { a: 1, b: 'x', c: true };
+    const overrides = { a: undefined, b: 'y', c: false };
+    expect(withOptions(base, overrides)).toEqual({ a: 1, b: 'y', c: false });
+    expect(base).toEqual({ a: 1, b: 'x', c: true });
+    expect(withOptions(base)).toEqual(base);
+    expect(withOptions(base, null)).toEqual(base);
+    expect(withOptions(base)).not.toBe(base);
+  });
+});
+
+describe('jsonText (F070)', () => {
+  it('matches JSON.stringify for ordinary data and tolerates bigint / circular values', () => {
+    const value = { a: [1, 'x', null, { b: true }], d: new Date(0), s: 'café "q"' };
+    expect(jsonText(value)).toBe(JSON.stringify(value));
+    expect(jsonText([undefined, () => 1, 1])).toBe(JSON.stringify([undefined, () => 1, 1]));
+    expect(jsonText([123456789012345678901234567890n])).toBe('["123456789012345678901234567890"]');
+    const loop: unknown[] = [];
+    loop.push(loop);
+    expect(jsonText({ loop })).toBe('{"loop":[null]}');
+  });
+});
 });

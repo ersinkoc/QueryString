@@ -160,8 +160,10 @@ export function isNonASCII(str: string): boolean {
 export function interpretNumericEntities(str: string): string {
   return str.replace(/&#(\d+);/g, (_match, entity) => {
     const code = parseInt(entity, 10);
-    if (code < 0xFFFF) {
-      return String.fromCharCode(code);
+    // [F071] Any scalar value becomes its character (astral ones too, so the latin1 output of stringify round-trips);
+    // surrogates (they would form a malformed string) and values beyond U+10FFFF are dropped.
+    if (code <= 0x10FFFF && (code < 0xD800 || code > 0xDFFF)) {
+      return String.fromCodePoint(code);
     }
     return '';
   });
@@ -188,7 +190,9 @@ export function isValidDate(date: unknown): date is Date {
 }
 
 export function tryParseDate(str: string): Date | string {
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(str);
+  // [F072] Only ISO-8601 shapes qualify; V8's legacy fallback would otherwise turn '2020-01-02 Mar' or '2020-01-02 (note)' into a Date.
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?$/.exec(str);
   if (!match) {
     return str;
   }

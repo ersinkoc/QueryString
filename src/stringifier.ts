@@ -1,6 +1,6 @@
 import { StringifyOptions, ArrayFormat } from './types';
 import { encode, isValidDate } from './utils/encoding';
-import { isObject, hasOwn } from './utils/object';
+import { isObject, hasOwn, withOptions, jsonText } from './utils/object';
 import { joinArrayFormat } from './utils/array';
 
 const defaults: Omit<Required<StringifyOptions>, 'encoder'> & { encoder?: StringifyOptions['encoder'] } = {
@@ -33,7 +33,7 @@ export function stringify(obj: unknown, options?: StringifyOptions): string {
   // Create a new seen set for each stringify operation
   const seen = new WeakSet<object>();
 
-  const opts = { ...defaults, ...options };
+  const opts = withOptions(defaults, options);
   const {
     delimiter,
     strictNullHandling,
@@ -126,7 +126,8 @@ export function stringify(obj: unknown, options?: StringifyOptions): string {
     result = result ? `${charsetPrefix}&${result}` : charsetPrefix;
   }
 
-  if (addQueryPrefix) {
+  // [F059] Nothing to prefix for an empty query.
+  if (addQueryPrefix && result) {
     result = '?' + result;
   }
 
@@ -175,7 +176,7 @@ function stringifyObject(
       continue;
     }
 
-    const value = obj[key];
+    let value = obj[key];
     
     // Skip functions
     if (typeof value === 'function') {
@@ -184,9 +185,10 @@ function stringifyObject(
     
     const fullKey = prefix ? (allowDots ? `${prefix}.${key}` : `${prefix}[${key}]`) : key;
 
-    if (filter) {
-      const filtered = typeof filter === 'function' ? filter(fullKey, value) : value;
-      if (filtered === undefined) {
+    if (filter && typeof filter === 'function') {
+      // [F057] The returned value replaces the original (undefined drops the key), at every depth.
+      value = filter(fullKey, value);
+      if (value === undefined) {
         continue;
       }
     }
@@ -215,17 +217,44 @@ function stringifyObject(
     }
 
     if (Array.isArray(value)) {
-      if (value.length === 0 && skipNulls) {
+      // [F058] skipNulls omits null / undefined elements, like it omits null properties.
+      const items: unknown[] =
+        skipNulls && arrayFormat !== 'json' ? value.filter((v) => v !== null && v !== undefined) : value;
+
+      if (items.length === 0 && skipNulls) {
+        continue;
+      }
+
+      // [F058] strictNullHandling: a null element is a bare key (as for a null property), not an empty value.
+      if (
+        strictNullHandling &&
+        (arrayFormat === 'repeat' || arrayFormat === 'brackets' || arrayFormat === 'indices') &&
+        items.some((v) => v === null || v === undefined)
+      ) {
+        const baseKey = encodeValuesOnly ? fullKey : keyEncoder(fullKey);
+        items.forEach((item, index) => {
+          const itemKey =
+            arrayFormat === 'brackets'
+              ? `${baseKey}[]`
+              : arrayFormat === 'indices'
+                ? `${baseKey}[${index}]`
+                : baseKey;
+          pairs.push(
+            item === null || item === undefined
+              ? itemKey
+              : `${itemKey}=${stringifyValue(item, { encoder, serializeDate })}`
+          );
+        });
         continue;
       }
 
       // [F040] commaRoundTrip: a one-element comma array keeps its "[]" so it parses back as an array.
       const arrayKey =
-        arrayFormat === 'comma' && commaRoundTrip && value.length === 1 ? `${fullKey}[]` : fullKey;
+        arrayFormat === 'comma' && commaRoundTrip && items.length === 1 ? `${fullKey}[]` : fullKey;
 
       const arrayPairs = joinArrayFormat(
         encodeValuesOnly ? arrayKey : keyEncoder(arrayKey),
-        arrayFormat === 'json' ? value : value.map((v) => stringifyValue(v, { encoder, serializeDate })),
+        arrayFormat === 'json' ? items : items.map((v) => stringifyValue(v, { encoder, serializeDate })),
         arrayFormat,
         arrayFormatSeparator
       );
@@ -285,7 +314,7 @@ function stringifyValue(
   }
 
   if (typeof value === 'object') {
-    return encoder(JSON.stringify(value));
+    return encoder(jsonText(value));
   }
 
   return encoder(String(value));
@@ -296,7 +325,8 @@ export function stringifyUrl(url: string, query: unknown, options?: StringifyOpt
     return '';
   }
 
-  const queryString = stringify(query, options);
+  // [F059] The URL helper adds its own '?' / '&' separator; a query prefix would double it.
+  const queryString = stringify(query, { ...options, addQueryPrefix: false });
   
   if (!queryString) {
     return url;

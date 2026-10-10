@@ -1,4 +1,5 @@
 import { ArrayFormat, QueryValue } from '../types';
+import { jsonText } from './object';
 
 export function joinArrayFormat(
   key: string,
@@ -27,7 +28,7 @@ export function joinArrayFormat(
       return [`${key}=${values.join(separator)}`];
     
     case 'json':
-      return [`${key}=${JSON.stringify(values)}`];
+      return [`${key}=${jsonText(values)}`];
     
     case 'bracket-separator':
       return [`${key}[]=${values.join(separator)}`];

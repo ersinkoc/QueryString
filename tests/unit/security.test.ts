@@ -426,4 +426,68 @@ describe('Security', () => {
       expect(hasPrototypePollution({ l: [Object.setPrototypeOf({}, { admin: 'yes' })] })).toBe(true);
     });
   });
+
+  describe('XSS detector precision (F054, F055)', () => {
+    const flagged = (value: string) => detectXSS({ v: value }).length > 0;
+
+    it('flags opening script / iframe / style tags without a closing tag or on several lines (F054)', () => {
+      for (const value of ['<script>alert(1)', '<script>\nalert(1)\n</script>', '<SCRIPT SRC=//evil.example/x.js>', '<iframe src=//evil>', '<style>@import url(x)']) {
+        expect(flagged(value)).toBe(true);
+      }
+      expect(validateSecurity({ q: '<script>alert(1)' }).valid).toBe(false);
+      expect(detectXSS({ '<script>': 'x' })).toEqual(['<script> (key)']);
+      expect(flagged('<scripture>')).toBe(false);
+      expect(flagged('JavaScript is fun')).toBe(false);
+    });
+
+    it('does not treat ordinary words as event handlers or data: URIs (F055)', () => {
+      for (const value of ['/search?options=a', 'Connection=keep-alive', 'metadata: a, b']) {
+        expect(flagged(value)).toBe(false);
+      }
+      expect(validateSecurity({ next: '/p?actions=1&sort=asc' }).valid).toBe(true);
+      expect(sanitizeInput('Connection=keep-alive')).toBe('Connection=keep-alive');
+      expect(sanitizeInput('/search?actions=1&x=2')).toBe('&#x2F;search?actions=1&x=2');
+      expect(sanitizeInput('I like options = yes')).toBe('I like options = yes');
+      for (const value of ['<a onclick=x()>', '"onfocus=alert(1) x', ' ONCLICK=1', 'data:text/html,<b>']) {
+        expect(flagged(value)).toBe(true);
+      }
+      expect(sanitizeInput('<img src=x onerror=alert(1)>')).toBe('&lt;img src=x &gt;');
+    });
+  });
+
+  describe('runaway input (F066, F067)', () => {
+    const deep = (levels: number): Record<string, unknown> => {
+      let value: Record<string, unknown> = { v: 'x' };
+      for (let i = 0; i < levels; i++) {
+        value = { a: value };
+      }
+      return value;
+    };
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    it('reports very deep or circular values instead of overflowing the stack (F066)', () => {
+      for (const value of [deep(20000), deep(200000), circular]) {
+        const result = validateSecurity(value as never, { maxDepth: 10 });
+        expect(result.valid).toBe(false);
+        expect(result.errors).toEqual(['Object too deep: over 1000 levels (max: 10)']);
+      }
+      expect(validateSecurity(deep(50) as never, { maxDepth: 10 }).errors).toEqual(['Object too deep: 51 levels (max: 10)']);
+      expect(validateSecurity(deep(1500) as never, { maxDepth: 5000, maxKeys: 1e6 }).valid).toBe(true);
+      expect(() => secureStringify(deep(20000), { maxDepth: 5 })).toThrow('Security validation failed: Object too deep: over 1000 levels');
+      expect(() => secureStringify(circular, { sanitize: true, maxDepth: 5 })).toThrow('Object too deep: over 1000 levels');
+      expect(() => createSecureParser((() => deep(20000)) as never, { maxDepth: 5 })('q')).toThrow('Object too deep: over 1000 levels');
+      expect(createSecureParser({ maxDepth: 3 })('a[b]=1')).toEqual({ a: { b: '1' } });
+    });
+
+    it('checks for prototype pollution in linear time (F067)', () => {
+      const started = Date.now();
+      expect(hasPrototypePollution(deep(500))).toBe(false);
+      expect(hasPrototypePollution(deep(30))).toBe(false);
+      expect(validateSecurity(deep(30) as never, { maxDepth: 100 }).valid).toBe(true);
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(hasPrototypePollution(JSON.parse('{"a":'.repeat(30) + '{"__proto__":1}' + '}'.repeat(30)))).toBe(true);
+      expect(hasPrototypePollution(Object.defineProperty({}, 'prototype', { value: 1, enumerable: false }))).toBe(true);
+    });
+  });
 });

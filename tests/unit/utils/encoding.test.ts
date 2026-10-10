@@ -164,8 +164,14 @@ describe('Encoding utilities', () => {
       expect(interpretNumericEntities('&#72;&#101;&#108;&#108;&#111;')).toBe('Hello');
     });
 
-    it('should ignore entities above 0xFFFF', () => {
-      expect(interpretNumericEntities('hello&#65536;world')).toBe('helloworld');
+    it('decodes astral entities and ignores surrogates and values beyond U+10FFFF (F071)', () => {
+      // Previously every entity above 0xFFFF was dropped, which broke the latin1 round trip of astral characters.
+      expect(interpretNumericEntities('hello&#65536;world')).toBe('hello\u{10000}world');
+      expect(interpretNumericEntities('x&#128512;y')).toBe('x\u{1F600}y');
+      expect(interpretNumericEntities('&#1114111;')).toBe('\u{10FFFF}');
+      expect(interpretNumericEntities('a&#1114112;b')).toBe('ab');
+      expect(interpretNumericEntities('a&#55357;b&#56832;c')).toBe('abc');
+      expect(interpretNumericEntities('A&#8364;')).toBe('A€');
     });
 
     it('should ignore malformed entities', () => {
@@ -291,6 +297,20 @@ describe('Encoding utilities', () => {
     it('still encodes valid surrogate pairs', () => {
       expect(encode('\u{1F600}')).toBe('%F0%9F%98%80');
       expect(encode('a\u{1F600}\u{1F600}')).toBe('a%F0%9F%98%80%F0%9F%98%80');
+    });
+  });
+
+  describe('non-ISO text after a date (audit F072)', () => {
+    it('keeps text with a date prefix as a string instead of using the legacy Date fallback', () => {
+      for (const text of ['2020-01-02 Mar', '2020-01-02 (comment)', '2020-01-02 12:00 PM', '2020-01-02 PST', '2020-01-02 12:00 EST', '2020-01-02Z', '2020-01-02T']) {
+        expect(tryParseDate(text)).toBe(text);
+      }
+    });
+
+    it('still parses ISO-8601 date and date-time forms', () => {
+      expect((tryParseDate('2020-01-02T03:04:05.123Z') as Date).toISOString()).toBe('2020-01-02T03:04:05.123Z');
+      expect((tryParseDate('2020-01-02T03:04:05+0100') as Date).toISOString()).toBe('2020-01-02T02:04:05.000Z');
+      expect((tryParseDate('2020-01-02T03:04Z') as Date).toISOString()).toBe('2020-01-02T03:04:00.000Z');
     });
   });
 

@@ -38,6 +38,24 @@ function setOwn(target: Record<string, unknown>, key: string, value: unknown): v
   target[key] = value;
 }
 
+// [F050] A default is handed out per parse; mutable defaults (arrays, dates, plain objects) are copied so callers cannot change them.
+function cloneDefault<V>(value: V): V {
+  if (value instanceof Date) {
+    return new Date(value.getTime()) as unknown as V;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneDefault(item)) as unknown as V;
+  }
+  if (value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const copy: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      setOwn(copy, key, cloneDefault((value as Record<string, unknown>)[key]));
+    }
+    return copy as V;
+  }
+  return value;
+}
+
 abstract class BaseSchemaImpl<T> implements BaseSchema<T> {
   abstract type: string;
   protected _default?: T;
@@ -71,19 +89,39 @@ abstract class BaseSchemaImpl<T> implements BaseSchema<T> {
   }
 
   default(value: T): this {
-    this._default = value;
-    return this;
+    const copy = this.clone();
+    copy._default = value;
+    return copy;
+  }
+
+  // [F068] Modifiers return a modified copy; the receiver (often a shared base schema) is never changed.
+  protected clone(): this {
+    const copy = Object.create(Object.getPrototypeOf(this)) as this;
+    const source = this as unknown as Record<string, unknown>;
+    const target = copy as unknown as Record<string, unknown>;
+    for (const key of Object.keys(source)) {
+      const value = source[key];
+      target[key] = Array.isArray(value) ? value.slice() : value;
+    }
+    return copy;
+  }
+
+  protected defaultValue(): T | undefined {
+    return cloneDefault(this._default);
   }
 
   transform<U>(fn: (value: T) => U): BaseSchema<U> {
-    const schema = this as any;
-    schema._transforms.push(fn);
-    return schema;
+    const copy = this.clone() as unknown as BaseSchemaImpl<U>;
+    (copy as unknown as { _transforms: Array<(value: unknown) => unknown> })._transforms.push(
+      fn as (value: unknown) => unknown
+    );
+    return copy;
   }
 
   refine(fn: (value: T) => boolean, message = 'Validation failed'): this {
-    this._refinements.push({ fn, message });
-    return this;
+    const copy = this.clone();
+    copy._refinements.push({ fn, message });
+    return copy;
   }
 
   protected applyTransforms(value: T): any {
@@ -108,17 +146,18 @@ class StringSchemaImpl extends BaseSchemaImpl<string> implements StringSchema {
   private _min?: number;
   private _max?: number;
   private _length?: number;
-  private _regex?: RegExp;
-  private _startsWith?: string;
-  private _endsWith?: string;
-  private _includes?: string;
+  // [F047] Every configured check must pass; later calls add to earlier ones instead of replacing them.
+  private _patterns: RegExp[] = [];
+  private _startsWith: string[] = [];
+  private _endsWith: string[] = [];
+  private _includes: string[] = [];
   private _trim = false;
   private _toLowerCase = false;
   private _toUpperCase = false;
 
   parse(value: unknown): string {
     if (value === undefined && this._default !== undefined) {
-      value = this._default;
+      value = this.defaultValue();
     }
 
     if (typeof value !== 'string') {
@@ -140,21 +179,27 @@ class StringSchemaImpl extends BaseSchemaImpl<string> implements StringSchema {
     if (this._max !== undefined && str.length > this._max) {
       throw new Error(`String must be at most ${this._max} characters`);
     }
-    if (this._regex) {
+    for (const pattern of this._patterns) {
       // [F028] test() on a /g or /y RegExp advances lastIndex; start every validation from 0.
-      this._regex.lastIndex = 0;
+      pattern.lastIndex = 0;
+      if (!pattern.test(str)) {
+        throw new Error(`String does not match pattern`);
+      }
     }
-    if (this._regex && !this._regex.test(str)) {
-      throw new Error(`String does not match pattern`);
+    for (const prefix of this._startsWith) {
+      if (!str.startsWith(prefix)) {
+        throw new Error(`String must start with "${prefix}"`);
+      }
     }
-    if (this._startsWith && !str.startsWith(this._startsWith)) {
-      throw new Error(`String must start with "${this._startsWith}"`);
+    for (const suffix of this._endsWith) {
+      if (!str.endsWith(suffix)) {
+        throw new Error(`String must end with "${suffix}"`);
+      }
     }
-    if (this._endsWith && !str.endsWith(this._endsWith)) {
-      throw new Error(`String must end with "${this._endsWith}"`);
-    }
-    if (this._includes && !str.includes(this._includes)) {
-      throw new Error(`String must include "${this._includes}"`);
+    for (const substring of this._includes) {
+      if (!str.includes(substring)) {
+        throw new Error(`String must include "${substring}"`);
+      }
     }
 
     this.applyRefinements(str);
@@ -162,68 +207,82 @@ class StringSchemaImpl extends BaseSchemaImpl<string> implements StringSchema {
   }
 
   min(length: number): this {
-    this._min = length;
-    return this;
+    const copy = this.clone();
+    copy._min = length;
+    return copy;
   }
 
   max(length: number): this {
-    this._max = length;
-    return this;
+    const copy = this.clone();
+    copy._max = length;
+    return copy;
   }
 
   length(length: number): this {
-    this._length = length;
-    return this;
+    const copy = this.clone();
+    copy._length = length;
+    return copy;
   }
 
   email(): this {
-    this._regex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    return this;
+    const copy = this.clone();
+    // [F048] The lookahead checks the domain once, so a failing match cannot backtrack quadratically.
+    copy._patterns.push(/^[^\s@]+@(?=[^\s@]*$)[^\s@]+\.[^\s@]+$/);
+    return copy;
   }
 
   url(): this {
-    this._regex = /^https?:\/\/.+/;
-    return this;
+    const copy = this.clone();
+    copy._patterns.push(/^https?:\/\/.+/);
+    return copy;
   }
 
   uuid(): this {
-    this._regex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    return this;
+    const copy = this.clone();
+    copy._patterns.push(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    return copy;
   }
 
   regex(pattern: RegExp): this {
-    this._regex = pattern;
-    return this;
+    const copy = this.clone();
+    copy._patterns.push(pattern);
+    return copy;
   }
 
   startsWith(prefix: string): this {
-    this._startsWith = prefix;
-    return this;
+    const copy = this.clone();
+    copy._startsWith.push(prefix);
+    return copy;
   }
 
   endsWith(suffix: string): this {
-    this._endsWith = suffix;
-    return this;
+    const copy = this.clone();
+    copy._endsWith.push(suffix);
+    return copy;
   }
 
   includes(substring: string): this {
-    this._includes = substring;
-    return this;
+    const copy = this.clone();
+    copy._includes.push(substring);
+    return copy;
   }
 
   trim(): this {
-    this._trim = true;
-    return this;
+    const copy = this.clone();
+    copy._trim = true;
+    return copy;
   }
 
   toLowerCase(): this {
-    this._toLowerCase = true;
-    return this;
+    const copy = this.clone();
+    copy._toLowerCase = true;
+    return copy;
   }
 
   toUpperCase(): this {
-    this._toUpperCase = true;
-    return this;
+    const copy = this.clone();
+    copy._toUpperCase = true;
+    return copy;
   }
 }
 
@@ -242,7 +301,7 @@ class NumberSchemaImpl extends BaseSchemaImpl<number> implements NumberSchema {
 
   parse(value: unknown): number {
     if (value === undefined && this._default !== undefined) {
-      value = this._default;
+      value = this.defaultValue();
     }
 
     // Reject boolean values explicitly
@@ -296,53 +355,63 @@ class NumberSchemaImpl extends BaseSchemaImpl<number> implements NumberSchema {
   }
 
   min(value: number): this {
-    this._min = value;
-    return this;
+    const copy = this.clone();
+    copy._min = value;
+    return copy;
   }
 
   max(value: number): this {
-    this._max = value;
-    return this;
+    const copy = this.clone();
+    copy._max = value;
+    return copy;
   }
 
   int(): this {
-    this._int = true;
-    return this;
+    const copy = this.clone();
+    copy._int = true;
+    return copy;
   }
 
   positive(): this {
-    this._positive = true;
-    return this;
+    const copy = this.clone();
+    copy._positive = true;
+    return copy;
   }
 
   negative(): this {
-    this._negative = true;
-    return this;
+    const copy = this.clone();
+    copy._negative = true;
+    return copy;
   }
 
   nonpositive(): this {
-    this._nonpositive = true;
-    return this;
+    const copy = this.clone();
+    copy._nonpositive = true;
+    return copy;
   }
 
   nonnegative(): this {
-    this._nonnegative = true;
-    return this;
+    const copy = this.clone();
+    copy._nonnegative = true;
+    return copy;
   }
 
   multipleOf(value: number): this {
-    this._multipleOf = value;
-    return this;
+    const copy = this.clone();
+    copy._multipleOf = value;
+    return copy;
   }
 
   finite(): this {
-    this._finite = true;
-    return this;
+    const copy = this.clone();
+    copy._finite = true;
+    return copy;
   }
 
   safe(): this {
-    this._safe = true;
-    return this;
+    const copy = this.clone();
+    copy._safe = true;
+    return copy;
   }
 }
 
@@ -351,7 +420,7 @@ class BooleanSchemaImpl extends BaseSchemaImpl<boolean> implements BooleanSchema
 
   parse(value: unknown): boolean {
     if (value === undefined && this._default !== undefined) {
-      value = this._default;
+      value = this.defaultValue();
     }
 
     if (typeof value === 'boolean') {
@@ -380,7 +449,7 @@ class DateSchemaImpl extends BaseSchemaImpl<Date> implements DateSchema {
 
   parse(value: unknown): Date {
     if (value === undefined && this._default !== undefined) {
-      value = this._default;
+      value = this.defaultValue();
     }
 
     let date: Date;
@@ -409,13 +478,15 @@ class DateSchemaImpl extends BaseSchemaImpl<Date> implements DateSchema {
   }
 
   min(date: Date): this {
-    this._min = date;
-    return this;
+    const copy = this.clone();
+    copy._min = date;
+    return copy;
   }
 
   max(date: Date): this {
-    this._max = date;
-    return this;
+    const copy = this.clone();
+    copy._max = date;
+    return copy;
   }
 }
 
@@ -434,7 +505,7 @@ class ArraySchemaImpl<T> extends BaseSchemaImpl<T[]> implements ArraySchema<T> {
 
   parse(value: unknown): T[] {
     if (value === undefined && this._default !== undefined) {
-      value = this._default;
+      value = this.defaultValue();
     }
 
     if (!Array.isArray(value)) {
@@ -469,23 +540,27 @@ class ArraySchemaImpl<T> extends BaseSchemaImpl<T[]> implements ArraySchema<T> {
   }
 
   min(length: number): this {
-    this._min = length;
-    return this;
+    const copy = this.clone();
+    copy._min = length;
+    return copy;
   }
 
   max(length: number): this {
-    this._max = length;
-    return this;
+    const copy = this.clone();
+    copy._max = length;
+    return copy;
   }
 
   length(length: number): this {
-    this._length = length;
-    return this;
+    const copy = this.clone();
+    copy._length = length;
+    return copy;
   }
 
   nonempty(): this {
-    this._nonempty = true;
-    return this;
+    const copy = this.clone();
+    copy._nonempty = true;
+    return copy;
   }
 }
 
@@ -501,7 +576,7 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
 
   parse(value: unknown): T {
     if (value === undefined && this._default !== undefined) {
-      value = this._default;
+      value = this.defaultValue();
     }
 
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -564,30 +639,38 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
   }
 
   shape<S extends Record<string, SchemaType>>(shape: S): ObjectSchema<{ [K in keyof S]: S[K] extends BaseSchema<infer U> ? U : never }> {
-    this._shape = shape as any;
-    return this as any;
+    const copy = this.clone();
+    copy._shape = shape as any;
+    return copy as any;
   }
 
   strict(): this {
-    this._strict = true;
-    this._passthrough = false;
-    return this;
+    const copy = this.clone();
+    copy._strict = true;
+    copy._passthrough = false;
+    return copy;
   }
 
   passthrough(): this {
-    this._passthrough = true;
-    this._strict = false;
-    return this;
+    const copy = this.clone();
+    copy._passthrough = true;
+    copy._strict = false;
+    return copy;
   }
 
   strip(): this {
-    // this._strip = true; // Property was commented out earlier
-    return this;
+    const copy = this.clone();
+    // [F049] Unknown keys are dropped: leave strict / passthrough / catchall mode.
+    copy._strict = false;
+    copy._passthrough = false;
+    copy._catchall = undefined;
+    return copy;
   }
 
   catchall(schema: SchemaType): this {
-    this._catchall = schema as BaseSchema<unknown>;
-    return this;
+    const copy = this.clone();
+    copy._catchall = schema as BaseSchema<unknown>;
+    return copy;
   }
 
   pick<K extends keyof T>(keys: K[]): ObjectSchema<Pick<T, K>> {
@@ -649,11 +732,33 @@ class ObjectSchemaImpl<T extends Record<string, unknown>> extends BaseSchemaImpl
   }
 
   deepPartial(): ObjectSchema<DeepPartial<T>> {
-    return this as any;
+    // [F049] Nested object schemas become partial too.
+    if (!this._shape) {
+      return this as any;
+    }
+
+    const newShape: Record<string, BaseSchema<unknown>> = {};
+    for (const [key, value] of Object.entries(this._shape)) {
+      const inner =
+        value instanceof ObjectSchemaImpl ? (value.deepPartial() as BaseSchema<unknown>) : value;
+      newShape[key] = inner.optional();
+    }
+
+    return this.derive<DeepPartial<T>>(newShape);
   }
 
   required(): ObjectSchema<Required<T>> {
-    return this as any;
+    // [F049] Unwrap optional() so every field must be present again.
+    if (!this._shape) {
+      return this as any;
+    }
+
+    const newShape: Record<string, BaseSchema<unknown>> = {};
+    for (const [key, value] of Object.entries(this._shape)) {
+      newShape[key] = value instanceof OptionalSchemaImpl ? value.innerType : value;
+    }
+
+    return this.derive<Required<T>>(newShape);
   }
 }
 
@@ -668,7 +773,7 @@ class EnumSchemaImpl<T extends readonly [string, ...string[]]> extends BaseSchem
 
   parse(value: unknown): T[number] {
     if (value === undefined && this._default !== undefined) {
-      value = this._default;
+      value = this.defaultValue();
     }
 
     if (!this.options.includes(value as string)) {
@@ -691,7 +796,7 @@ class UnionSchemaImpl<T extends readonly SchemaType[]> extends BaseSchemaImpl<an
 
   parse(value: unknown): any {
     if (value === undefined && this._default !== undefined) {
-      value = this._default;
+      value = this.defaultValue();
     }
 
     const errors: string[] = [];
@@ -720,6 +825,11 @@ class OptionalSchemaImpl<T> extends BaseSchemaImpl<T | undefined> implements Opt
   }
 
   parse(value: unknown): T | undefined {
+    // [F051] A default set on the optional wrapper itself replaces a missing value.
+    if (value === undefined && this._default !== undefined) {
+      value = this.defaultValue();
+    }
+
     if (value === undefined) {
       return undefined;
     }
@@ -740,6 +850,11 @@ class NullableSchemaImpl<T> extends BaseSchemaImpl<T | null> implements Nullable
   }
 
   parse(value: unknown): T | null {
+    // [F051] A default set on the nullable wrapper itself replaces a missing value.
+    if (value === undefined && this._default !== undefined) {
+      value = this.defaultValue();
+    }
+
     if (value === null) {
       return null;
     }
@@ -767,10 +882,15 @@ export const q = {
     return new (class extends BaseSchemaImpl<T> {
       type = 'literal' as const;
       parse(input: unknown): T {
+        // [F052] The primitive schemas honour default / refine / transform like every other schema.
+        if (input === undefined && this._default !== undefined) {
+          input = this.defaultValue();
+        }
         if (input !== value) {
           throw new Error(`Expected ${value}, got ${input}`);
         }
-        return value;
+        this.applyRefinements(value);
+        return this.applyTransforms(value);
       }
     })();
   },
@@ -778,7 +898,11 @@ export const q = {
     return new (class extends BaseSchemaImpl<any> {
       type = 'any' as const;
       parse(value: unknown): any {
-        return value;
+        if (value === undefined && this._default !== undefined) {
+          value = this.defaultValue();
+        }
+        this.applyRefinements(value);
+        return this.applyTransforms(value);
       }
     })();
   },
@@ -786,7 +910,11 @@ export const q = {
     return new (class extends BaseSchemaImpl<unknown> {
       type = 'unknown' as const;
       parse(value: unknown): unknown {
-        return value;
+        if (value === undefined && this._default !== undefined) {
+          value = this.defaultValue();
+        }
+        this.applyRefinements(value);
+        return this.applyTransforms(value);
       }
     })();
   },
@@ -794,10 +922,14 @@ export const q = {
     return new (class extends BaseSchemaImpl<null> {
       type = 'null' as const;
       parse(value: unknown): null {
+        if (value === undefined && this._default !== undefined) {
+          value = this.defaultValue();
+        }
         if (value !== null) {
           throw new Error(`Expected null, got ${typeof value}`);
         }
-        return null;
+        this.applyRefinements(null);
+        return this.applyTransforms(null);
       }
     })();
   },
@@ -808,7 +940,8 @@ export const q = {
         if (value !== undefined) {
           throw new Error(`Expected undefined, got ${typeof value}`);
         }
-        return undefined;
+        this.applyRefinements(undefined);
+        return this.applyTransforms(undefined);
       }
     })();
   },
@@ -819,7 +952,8 @@ export const q = {
         if (value !== undefined) {
           throw new Error(`Expected void, got ${typeof value}`);
         }
-        return undefined as void;
+        this.applyRefinements(undefined);
+        return this.applyTransforms(undefined);
       }
     })();
   },

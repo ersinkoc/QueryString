@@ -243,7 +243,7 @@ describe('Schema Validation', () => {
     it('should handle default values', () => {
       const defaultDate = new Date('2024-01-01');
       const schema = q.date().default(defaultDate);
-      expect(schema.parse(undefined)).toBe(defaultDate);
+      expect(schema.parse(undefined)).toEqual(defaultDate); // [F050] a copy, not the shared instance
       expect(schema.parse('2024-12-31')).toBeInstanceOf(Date);
     });
   });
@@ -289,7 +289,7 @@ describe('Schema Validation', () => {
     it('should handle default values', () => {
       const defaultArray = [1, 2, 3];
       const schema = q.array().default(defaultArray);
-      expect(schema.parse(undefined)).toBe(defaultArray);
+      expect(schema.parse(undefined)).toEqual(defaultArray); // [F050] a copy, not the shared instance
       expect(schema.parse(['a', 'b'])).toEqual(['a', 'b']);
     });
   });
@@ -694,6 +694,183 @@ describe('Schema Validation', () => {
       const catchall = q.object().shape({ a: q.string(), b: q.string() }).catchall(q.number()).pick(['a']);
       expect(catchall.parse({ a: 'x', n: 1 })).toEqual({ a: 'x', n: 1 });
       expect(() => catchall.parse({ a: 'x', n: 's' })).toThrow('Invalid value for key "n"');
+    });
+  });
+
+  describe('string checks accumulate (F047) and email() is linear (F048)', () => {
+    const accepts = (schema: { safeParse(v: unknown): { success: boolean } }, value: unknown) =>
+      schema.safeParse(value).success;
+
+    it('keeps every configured pattern / prefix / suffix / substring check', () => {
+      expect(accepts(q.string().email().regex(/corp\.com$/), 'not-an-email-corp.com')).toBe(false);
+      expect(accepts(q.string().email().regex(/@corp\.com$/), 'a@corp.com')).toBe(true);
+      expect(accepts(q.string().regex(/corp\.com$/).email(), 'a@other.com')).toBe(false);
+      expect(accepts(q.string().regex(/^a/).regex(/z$/), 'zzz')).toBe(false);
+      expect(accepts(q.string().url().regex(/example\.com/), 'ftp-not-url example.com')).toBe(false);
+      expect(accepts(q.string().startsWith('a').startsWith('b'), 'bxx')).toBe(false);
+      expect(accepts(q.string().endsWith('a').endsWith('b'), 'xxb')).toBe(false);
+      expect(accepts(q.string().includes('x').includes('y'), 'yy')).toBe(false);
+      expect(accepts(q.string().startsWith('a').startsWith('ab').endsWith('z').includes('m').regex(/^a/), 'abmz')).toBe(true);
+    });
+
+    it('keeps the email semantics and rejects a long dotted invalid value quickly', () => {
+      const email = q.string().email();
+      const cases: Array<[string, boolean]> = [
+        ['a@b.c', true],
+        ['a@b..c', true],
+        ['a b@c.d', false],
+        ['a@b', false],
+        ['a@@b.c', false],
+        ['a@b.', false],
+      ];
+      for (const [value, expected] of cases) {
+        expect(accepts(email, value)).toBe(expected);
+      }
+      const started = Date.now();
+      expect(accepts(email, `a@${'a.'.repeat(40000)} `)).toBe(false);
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+  });
+
+  describe('object modifiers and defaults (F049, F050, F051)', () => {
+    const base = () => q.object().shape({ a: q.string(), n: q.number() });
+
+    it('required() restores required fields and does not mutate the source', () => {
+      const partial = base().partial();
+      expect(partial.required().safeParse({}).success).toBe(false);
+      expect(partial.required().safeParse({ a: 'x', n: 1 })).toEqual({ success: true, data: { a: 'x', n: 1 } });
+      expect(partial.safeParse({}).success).toBe(true);
+      expect(q.object().shape({ a: q.string().nullable().optional() }).required().safeParse({ a: null }).success).toBe(true);
+      expect(q.object().shape({ a: q.string().optional() }).strict().required().safeParse({ a: 'x', b: 1 }).success).toBe(false);
+    });
+
+    it('strip() leaves strict / passthrough / catchall mode', () => {
+      expect(base().passthrough().strip().safeParse({ a: 'x', n: 1, extra: 1 })).toEqual({ success: true, data: { a: 'x', n: 1 } });
+      expect(base().strict().strip().safeParse({ a: 'x', n: 1, extra: 1 }).success).toBe(true);
+      expect(q.object().shape({ a: q.string() }).catchall(q.number()).strip().safeParse({ a: 'x', b: 'no' }).success).toBe(true);
+    });
+
+    it('deepPartial() makes nested object fields optional without touching the source', () => {
+      const nested = q.object().shape({ o: q.object().shape({ a: q.string() }) });
+      expect(nested.deepPartial().safeParse({}).success).toBe(true);
+      expect(nested.deepPartial().safeParse({ o: {} }).success).toBe(true);
+      expect(nested.deepPartial().safeParse({ o: { a: 1 } }).success).toBe(false);
+      expect(nested.safeParse({ o: {} }).success).toBe(false);
+      expect(q.object().deepPartial().safeParse({ z: 1 }).success).toBe(true);
+    });
+
+    it('returns an independent copy of a default on every parse (F050)', () => {
+      const list = q.array().default([]);
+      (list.parse(undefined) as unknown[]).push(1);
+      expect(list.parse(undefined)).toEqual([]);
+      const nested = q.array().default([[1], { a: [2] }]);
+      const first = nested.parse(undefined) as Array<number[] | { a: number[] }>;
+      (first[0] as number[]).push(9);
+      (first[1] as { a: number[] }).a.push(9);
+      expect(nested.parse(undefined)).toEqual([[1], { a: [2] }]);
+      const date = q.date().default(new Date(0));
+      date.parse(undefined).setUTCFullYear(2000);
+      expect(date.parse(undefined).toISOString()).toBe('1970-01-01T00:00:00.000Z');
+      expect(q.array().default([1]).parse([2])).toEqual([2]);
+    });
+
+    it('applies a default set on optional() / nullable() wrappers (F051)', () => {
+      expect(q.string().optional().default('x').parse(undefined)).toBe('x');
+      expect(q.string().optional().default('x').parse('y')).toBe('y');
+      expect(q.string().nullable().default('x').parse(undefined)).toBe('x');
+      expect(q.string().nullable().default('x').parse(null)).toBe(null);
+      expect(q.object().shape({ a: q.number().optional().default(5) }).parse({})).toEqual({ a: 5 });
+      expect(q.string().optional().parse(undefined)).toBeUndefined();
+    });
+  });
+
+  describe('primitive schemas honour refine / transform / default (F052)', () => {
+    it('runs refinements and transforms for literal / any / unknown / null / undefined / void', () => {
+      expect(q.any().refine((v) => v !== 'bad', 'no').safeParse('bad').success).toBe(false);
+      expect(q.unknown().refine((v) => v !== 'bad').safeParse('bad').success).toBe(false);
+      expect(q.literal('a').refine(() => false, 'nope').safeParse('a').success).toBe(false);
+      expect(q.literal(5).refine((v) => v === 5).transform((v) => v + 1).parse(5)).toBe(6);
+      expect(q.any().transform((v) => String(v)).parse(7)).toBe('7');
+      expect(q.null().refine(() => false).safeParse(null).success).toBe(false);
+      expect(q.undefined().transform(() => 'u').parse(undefined)).toBe('u');
+      expect(q.void().refine(() => false).safeParse(undefined).success).toBe(false);
+      expect(q.literal('a').safeParse('b').success).toBe(false);
+    });
+
+    it('applies defaults for literal / any / unknown / null', () => {
+      expect(q.unknown().default(3).parse(undefined)).toBe(3);
+      expect(q.literal('a').default('a').parse(undefined)).toBe('a');
+      expect(q.unknown().default(3).parse(4)).toBe(4);
+      expect(q.null().default(null).parse(undefined)).toBe(null);
+    });
+  });
+
+  // [F053] ts-jest type-checks this block: literal() / any() / transform() results must be usable as schema members.
+  describe('plain BaseSchema members in object / union schemas (F053)', () => {
+    it('composes literal(), any(), unknown(), null() and transform() results', () => {
+      const status = q.union(q.literal('a'), q.literal('b'));
+      const picked: 'a' | 'b' = status.parse('a');
+      const shaped = q.object().shape({
+        n: q.string().transform((s) => Number(s)),
+        k: q.literal('x'),
+        a: q.any(),
+        u: q.unknown(),
+        z: q.null(),
+      });
+      const result: { n: number } = shaped.parse({ n: '2', k: 'x', a: 1, u: 2, z: null });
+      expect(picked).toBe('a');
+      expect(result.n).toBe(2);
+      expect(schema({ k: q.literal('x') }).safeParse({ k: 'y' }).success).toBe(false);
+      expect(q.object().catchall(q.literal('x')).safeParse({ extra: 'x' }).success).toBe(true);
+      expect(q.object().shape({ a: q.string() }).extend({ k: q.literal(1) }).safeParse({ a: 's', k: 1 }).success).toBe(true);
+    });
+  });
+
+  describe('modifiers do not mutate the receiver (F068)', () => {
+    it('keeps sibling schemas derived from a shared base independent', () => {
+      const base = q.string();
+      const short = base.max(3);
+      const long = base.max(10);
+      expect(short.safeParse('abcdef').success).toBe(false);
+      expect(long.safeParse('abcdef').success).toBe(true);
+      expect(base.safeParse('abcdef').success).toBe(true);
+      expect(short).not.toBe(base);
+
+      const id = q.string();
+      const a = id.transform((s) => `${s}A`);
+      const b = id.transform((s) => `${s}B`);
+      expect([a.parse('x'), b.parse('x'), id.parse('x')]).toEqual(['xA', 'xB', 'x']);
+    });
+
+    it('does not leak refine / default / trim / email / min / strict / shape into the base', () => {
+      const number = q.number();
+      number.refine((n) => n > 10, 'big');
+      expect(number.safeParse(1).success).toBe(true);
+      const text = q.string();
+      text.default('d');
+      text.trim().toLowerCase();
+      text.email();
+      expect(text.safeParse(undefined).success).toBe(false);
+      expect(text.parse('  AB ')).toBe('  AB ');
+      expect(text.safeParse('not an email').success).toBe(true);
+      const list = q.array(q.number());
+      list.min(2);
+      expect(list.safeParse([]).success).toBe(true);
+      const object = q.object().shape({ a: q.string() });
+      expect(object.strict().safeParse({ a: 'x', b: 1 }).success).toBe(false);
+      expect(object.safeParse({ a: 'x', b: 1 }).success).toBe(true);
+      const free = q.object();
+      const x = free.shape({ a: q.string() });
+      const y = free.shape({ b: q.number() });
+      expect([x.safeParse({ b: 1 }).success, y.safeParse({ a: 'x' }).success, free.safeParse({ z: 1 }).success]).toEqual([false, false, true]);
+    });
+
+    it('still accumulates checks along one chain', () => {
+      const s = q.string().trim().min(2).max(4).toLowerCase();
+      expect(s.parse('  ABC ')).toBe('abc');
+      expect(s.safeParse('  A ').success).toBe(false);
+      expect(q.string().transform((v) => `${v}1`).transform((v) => `${v}2`).parse('x')).toBe('x12');
+      expect(q.number().refine((n) => n > 1, 'gt1').refine((n) => n < 5, 'lt5').safeParse(9).success).toBe(false);
     });
   });
 });

@@ -6,7 +6,7 @@ import {
   tryParseDate,
   interpretNumericEntities
 } from './utils/encoding';
-import { hasOwn } from './utils/object';
+import { hasOwn, withOptions } from './utils/object';
 import { parseArrayFormat, isArrayKey, normalizeArrayKey, combineArrayValues } from './utils/array';
 
 const defaults: Required<ParseOptions> = {
@@ -39,7 +39,7 @@ const defaults: Required<ParseOptions> = {
 // [F043] `parse<SearchParams>(...)` is the documented typed call; the result type is the caller's assertion.
 export function parse<T extends object = ParsedQuery>(input: string, options?: ParseOptions): T;
 export function parse(input: string, options?: ParseOptions): unknown {
-  const opts = { ...defaults, ...options };
+  const opts = withOptions(defaults, options);
   const {
     delimiter,
     depth,
@@ -101,6 +101,7 @@ export function parse(input: string, options?: ParseOptions): unknown {
   const activeDecoder = decoder === decode ? baseDecoder : decoder;
   
   const result: ParsedQuery = plainObjects ? Object.create(null) : {};
+  const emptyBracketCounts = new Map<string, number>();
 
   if (pairs.length > parameterLimit) {
     throw new Error(`Parameter limit exceeded. Maximum allowed: ${parameterLimit}`);
@@ -126,13 +127,14 @@ export function parse(input: string, options?: ParseOptions): unknown {
 
     let key: string;
     let val: string;
+    let rawVal: string | undefined;
 
     if (equalIndex === -1) {
       key = shouldDecode ? activeDecoder(pair, baseDecoder) : pair;
       val = strictNullHandling ? null as any : '';
     } else {
       const rawKey = pair.slice(0, equalIndex);
-      const rawVal = pair.slice(equalIndex + 1);
+      rawVal = pair.slice(equalIndex + 1);
       key = shouldDecode ? activeDecoder(rawKey, baseDecoder) : rawKey;
       val = shouldDecode ? activeDecoder(rawVal, baseDecoder) : rawVal;
     }
@@ -146,20 +148,46 @@ export function parse(input: string, options?: ParseOptions): unknown {
       val = val.split(',').join(',');
     }
 
-    let parsedValue: QueryValue = val;
+    const coerce = (input: string): QueryValue => {
+      let coerced: QueryValue = input;
 
-    if (typeCoercionOpts.numbers || typeCoercionOpts.booleans) {
-      parsedValue = parseArrayValue(val, {
-        parseNumbers: typeCoercionOpts.numbers,
-        parseBooleans: typeCoercionOpts.booleans,
-      });
-    }
-
-    if (typeCoercionOpts.dates && typeof parsedValue === 'string') {
-      const dateValue = tryParseDate(parsedValue);
-      if (dateValue instanceof Date) {
-        parsedValue = dateValue as any;
+      if (typeCoercionOpts.numbers || typeCoercionOpts.booleans) {
+        coerced = parseArrayValue(input, {
+          parseNumbers: typeCoercionOpts.numbers,
+          parseBooleans: typeCoercionOpts.booleans,
+        });
       }
+
+      if (typeCoercionOpts.dates && typeof coerced === 'string') {
+        const dateValue = tryParseDate(coerced);
+        if (dateValue instanceof Date) {
+          coerced = dateValue as any;
+        }
+      }
+
+      return coerced;
+    };
+
+    let parsedValue: QueryValue = coerce(val);
+
+    // [F046] comma / separator arrays are split on the RAW value and each element is then decoded and coerced, so an
+    // encoded separator stays inside its element and encoded edge spaces survive (only literal whitespace is trimmed).
+    const splitSeparator =
+      arrayFormat === 'comma'
+        ? ','
+        : arrayFormat === 'separator' || arrayFormat === 'bracket-separator'
+          ? arrayFormatSeparator
+          : '';
+    const splitsOnSeparator = splitSeparator !== '';
+
+    if (parseArrays && splitsOnSeparator && rawVal !== undefined && rawVal.indexOf(splitSeparator) > -1) {
+      parsedValue = rawVal.split(splitSeparator).map((part) => {
+        let element = shouldDecode ? activeDecoder(part.trim(), baseDecoder) : part.trim();
+        if (shouldInterpretNumericEntities && charset === 'iso-8859-1') {
+          element = interpretNumericEntities(element);
+        }
+        return coerce(element);
+      }) as Primitive[];
     }
 
     if (parseArrays) {
@@ -168,19 +196,27 @@ export function parse(input: string, options?: ParseOptions): unknown {
         // [F021] The key syntax declares an array; keep one-element arrays as arrays.
         parsedValue = [parsedValue as Primitive];
       }
-      if (arrayFormat === 'comma' || arrayFormat === 'separator' || arrayFormat === 'json' || arrayFormat === 'bracket-separator') {
+      if (arrayFormat === 'json') {
         parsedValue = parseArrayFormat(key, parsedValue as string, arrayFormat, arrayFormatSeparator);
-        // [F040] `a[]=x` under the comma format declares an array too (what commaRoundTrip stringifies).
-        if (arrayFormat === 'comma' && key.endsWith('[]')) {
-          key = key.slice(0, -2);
-          parsedValue = Array.isArray(parsedValue) ? parsedValue : ([parsedValue] as Primitive[]);
-        }
       }
+      // [F040] `a[]=x` under the comma / bracket-separator formats declares an array too (what stringify writes).
+      if ((arrayFormat === 'comma' || arrayFormat === 'bracket-separator') && key.endsWith('[]')) {
+        key = key.slice(0, -2);
+        parsedValue = Array.isArray(parsedValue) ? parsedValue : ([parsedValue] as Primitive[]);
+      }
+    }
+
+    // [F063] parseArrays:false: `a[]` pushes numbered object keys (a[0], a[1], ...) instead of declaring an array.
+    if (!parseArrays && key.endsWith('[]')) {
+      const base = key.slice(0, -2);
+      const index = emptyBracketCounts.get(base) ?? 0;
+      emptyBracketCounts.set(base, index + 1);
+      key = `${base}[${index}]`;
     }
 
     let keys: string[];
     if (allowDots) {
-      keys = key.split('.');
+      keys = splitDotKey(key);
     } else if (key.includes('[') && key.includes(']')) {
       // Handle bracket notation like a[b][c]
       keys = key.split(/[\[\]]+/).filter(Boolean);
@@ -193,11 +229,56 @@ export function parse(input: string, options?: ParseOptions): unknown {
       allowPrototypes,
       duplicates,
       arrayFormat,
+      parseArrays,
     });
   }
 
   // [F003] allowSparse=false (default): drop holes created by index keys such as a[50000000]=x.
   return allowSparse ? result : (compactSparse(result) as ParsedQuery);
+}
+
+function isPrototypeKey(key: string): boolean {
+  return key !== '__proto__' && key !== 'constructor' && key in Object.prototype;
+}
+
+// [F062] With allowDots both `a.b` and `a[b]` nest (and mix); a dot inside brackets is literal, empty brackets add no segment.
+function splitDotKey(key: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let afterBracket = false;
+
+  for (let i = 0; i < key.length; i++) {
+    const char = key[i];
+
+    if (char === '.') {
+      if (!afterBracket) {
+        parts.push(current);
+      }
+      current = '';
+      afterBracket = false;
+    } else if (char === '[' && key.indexOf(']', i) !== -1) {
+      const close = key.indexOf(']', i);
+      if (current !== '') {
+        parts.push(current);
+        current = '';
+      }
+      const inner = key.slice(i + 1, close);
+      if (inner !== '') {
+        parts.push(inner);
+      }
+      afterBracket = true;
+      i = close;
+    } else {
+      current += char;
+      afterBracket = false;
+    }
+  }
+
+  if (current !== '' || parts.length === 0 || !afterBracket) {
+    parts.push(current);
+  }
+
+  return parts;
 }
 
 function compactSparse(value: QueryValue): QueryValue {
@@ -259,19 +340,26 @@ function parseKeys(
     allowPrototypes: boolean;
     duplicates: 'combine' | 'first' | 'last';
     arrayFormat: ArrayFormat;
+    parseArrays: boolean;
   }
 ): void {
   if (keys.length === 0) {
     return;
   }
 
-  const { depth, plainObjects, duplicates } = options;
+  const { depth, plainObjects, allowPrototypes, duplicates } = options;
   let target = obj;
+
+  // [F064] Unless allowed (or the objects have no prototype), a key that would shadow an Object.prototype method drops the pair.
+  // `__proto__` / `constructor` / `prototype` stay inert own data so the security layer can still detect and reject them.
+  if (!allowPrototypes && !plainObjects && keys.some(isPrototypeKey)) {
+    return;
+  }
 
   for (let i = 0; i < keys.length - 1; i++) {
     const key = keys[i];
     const nextKey = keys[i + 1];
-    const isArrayIndex = /^\d+$/.test(nextKey);
+    const isArrayIndex = options.parseArrays && /^\d+$/.test(nextKey);
 
     if (i >= depth) {
       return;
@@ -328,7 +416,19 @@ function parseKeys(
   } else if (duplicates === 'combine') {
     // Safe once the key exists as an own data property: it shadows the
     // inherited __proto__ accessor, so assignment updates the own key.
-    target[lastKey] = combineArrayValues(target[lastKey], value);
+    const existing = target[lastKey];
+    if (Array.isArray(existing)) {
+      // [F065] The accumulated array was built by this parse call: append in place instead of copying it for every duplicate (O(N^2)).
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          existing.push(item);
+        }
+      } else {
+        existing.push(value as Primitive);
+      }
+    } else {
+      target[lastKey] = combineArrayValues(existing, value);
+    }
   }
 }
 

@@ -22,6 +22,41 @@ export function setOwn(target: Record<string, unknown>, key: string, value: unkn
   target[key] = value;
 }
 
+// [F070] JSON.stringify that cannot crash on data the rest of the library accepts: BigInts become digit strings and circular
+// references are omitted (as circular object properties are skipped by stringify()).
+export function jsonText(value: unknown): string {
+  const ancestors: unknown[] = [];
+  return JSON.stringify(value, function (this: unknown, _key: string, item: unknown) {
+    if (typeof item === 'bigint') {
+      return item.toString();
+    }
+    if (item !== null && typeof item === 'object') {
+      while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) {
+        ancestors.pop();
+      }
+      if (ancestors.includes(item)) {
+        return undefined;
+      }
+      ancestors.push(item);
+    }
+    return item;
+  });
+}
+
+// [F056] Overlay options on a base, treating an explicitly `undefined` option as "not set" so it cannot erase a default
+// (e.g. `{ depth: undefined }` must not disable the depth limit).
+export function withOptions<T extends object>(base: T, overrides?: Partial<T> | null): T {
+  const result = { ...base };
+  if (overrides) {
+    for (const key of Object.keys(overrides) as Array<keyof T>) {
+      if (overrides[key] !== undefined) {
+        result[key] = overrides[key] as T[keyof T];
+      }
+    }
+  }
+  return result;
+}
+
 export function merge(target: Record<string, QueryValue>, source: Record<string, QueryValue>, options: { allowPrototypes?: boolean } = {}): Record<string, QueryValue> {
   if (!source) {
     return target;

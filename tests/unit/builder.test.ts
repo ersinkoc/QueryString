@@ -486,4 +486,89 @@ describe('QueryBuilder', () => {
       expect(QueryBuilder.from(typed).toObject()).toEqual({ q: 'x' });
     });
   });
+
+  describe('undefined call options keep builder options (F056)', () => {
+    it('does not let an explicit undefined erase a builder-level option', () => {
+      const builder = new QueryBuilder({ arrayFormat: 'brackets' }).add('a', [1, 2]);
+      expect(builder.toString({ arrayFormat: undefined })).toBe('a[]=1&a[]=2');
+      expect(builder.toString({ arrayFormat: 'comma' })).toBe('a=1,2');
+      expect(builder.toUrl('http://x.com/p', { arrayFormat: undefined })).toBe('http://x.com/p?a[]=1&a[]=2');
+    });
+  });
+
+  describe('the builder owns its data (F069)', () => {
+    it('copies values on the way in', () => {
+      const o = { x: 1 };
+      const a = [1];
+      const src = { n: { x: 1 } };
+      const builder = new QueryBuilder().add('o', o).addArray('a', a).addMultiple(src).append('k', o);
+      o.x = 2;
+      a.push(2);
+      src.n.x = 2;
+      expect(builder.toObject()).toEqual({ o: { x: 1 }, a: [1], n: { x: 1 }, k: { x: 1 } });
+      const added = { y: 1 };
+      const withObject = new QueryBuilder().addObject('o', added);
+      added.y = 2;
+      expect(withObject.toObject()).toEqual({ o: { y: 1 } });
+    });
+
+    it('keeps from() / create() / merge() results independent of their sources', () => {
+      const src = { o: { x: 1 } };
+      const created = QueryBuilder.create(src);
+      const fromObject = QueryBuilder.from(src);
+      const merged = new QueryBuilder().merge(src);
+      src.o.x = 2;
+      expect([created.toObject(), fromObject.toObject(), merged.toObject()]).toEqual([{ o: { x: 1 } }, { o: { x: 1 } }, { o: { x: 1 } }]);
+
+      const a = new QueryBuilder().add('o', { x: 1 });
+      const b = QueryBuilder.from(a);
+      const c = new QueryBuilder().merge(a);
+      (b.get('o') as { x: number }).x = 2;
+      (c.get('o') as { x: number }).x = 3;
+      expect(a.toObject()).toEqual({ o: { x: 1 } });
+    });
+
+    it('returns a snapshot from toObject() and copes with dates, cycles and __proto__ keys', () => {
+      const builder = new QueryBuilder().add('o', { x: 1 });
+      (builder.toObject() as { o: { x: number } }).o.x = 9;
+      expect(builder.toObject()).toEqual({ o: { x: 1 } });
+      const date = new Date(0);
+      const withDate = new QueryBuilder().add('d', date);
+      date.setUTCFullYear(2000);
+      expect((withDate.get('d') as Date).toISOString()).toBe('1970-01-01T00:00:00.000Z');
+      const cyclic: Record<string, unknown> = { a: 1 };
+      cyclic.self = cyclic;
+      const copy = new QueryBuilder().add('o', cyclic).get('o') as Record<string, unknown>;
+      expect(copy).not.toBe(cyclic);
+      expect(copy.self).toBe(copy);
+      const proto = new QueryBuilder().add('o', JSON.parse('{"__proto__":{"p":1},"a":1}')).get('o') as Record<string, unknown>;
+      expect(Object.getPrototypeOf(proto)).toBe(Object.prototype);
+      expect(Object.keys(proto).sort()).toEqual(['__proto__', 'a']);
+    });
+  });
+
+  describe('transform ownership (audit F073)', () => {
+    it('does not alias the object a transformer returns', () => {
+      const external: Record<string, unknown> = { a: [1] };
+      const b = new QueryBuilder().transform(() => external as never);
+      (external.a as number[]).push(2);
+      external.z = 1;
+      expect(b.toObject()).toEqual({ a: [1] });
+    });
+
+    it('rejects a non-object result and leaves the builder unchanged', () => {
+      const b = new QueryBuilder().add('a', 1);
+      for (const bad of [undefined, null, [1], 'x', 3]) {
+        expect(() => b.transform(() => bad as never)).toThrow(TypeError);
+      }
+      expect(b.toString()).toBe('a=1');
+      expect(b.add('c', 3).toString()).toBe('a=1&c=3');
+    });
+
+    it('does not half-apply edits when the transformer throws', () => {
+      const b = new QueryBuilder().add('a', 1);
+      expect(() => b.transform((q) => { (q as Record<string, unknown>).b = 2; throw new Error('x'); })).toThrow('x');
+      expect(b.toString()).toBe('a=1');
+    });
+  });
 });

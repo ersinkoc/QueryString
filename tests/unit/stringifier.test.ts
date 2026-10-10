@@ -456,6 +456,12 @@ describe('Stringifier', () => {
       expect(parse(stringify({ é: 'ÿ ü' }, latin1), latin1)).toEqual({ é: 'ÿ ü' });
     });
 
+    it('round-trips astral characters through numeric entities (F071)', () => {
+      const entities = { ...latin1, interpretNumericEntities: true };
+      expect(parse(stringify({ a: 'café \u{1F600}' }, latin1), entities)).toEqual({ a: 'café \u{1F600}' });
+      expect(stringify(parse('a=%26%2355357%3B', entities))).toBe('a=');
+    });
+
     it('honours format and encodeValuesOnly, and still rejects lone surrogates', () => {
       expect(stringify({ a: "x y!'()*é" }, { ...latin1, format: 'RFC1738' })).toBe("a=x+y!'()*%E9");
       expect(stringify({ a: "!'()*" }, latin1)).toBe('a=%21%27%28%29%2A');
@@ -476,6 +482,70 @@ describe('Stringifier', () => {
       expect(stringify({ a: 'é€' }, { charset: 'utf-8' })).toBe('a=%C3%A9%E2%82%AC');
       const encoder = (s: string, d: (x: string) => string, cs?: string) => `${cs}:${d(s)}`;
       expect(stringify({ a: 'é' }, { ...latin1, encoder })).toBe('iso-8859-1:a=iso-8859-1:%E9');
+    });
+  });
+
+  describe('undefined options mean "not set" (F056)', () => {
+    it('keeps the defaults when an option is explicitly undefined', () => {
+      expect(stringify({ a: 1, b: 2 }, { delimiter: undefined })).toBe('a=1&b=2');
+      expect(stringify({ a: 'é' }, { encode: undefined })).toBe('a=%C3%A9');
+      expect(stringify({ d: new Date(0) }, { serializeDate: undefined })).toBe('d=1970-01-01T00%3A00%3A00.000Z');
+      expect(stringify({ a: [1, 2] }, { arrayFormat: undefined, format: undefined, sort: undefined })).toBe('a=1&a=2');
+      expect(stringify({ a: 1 }, null as never)).toBe('a=1');
+      expect(stringify({ a: 'é' }, { encode: false })).toBe('a=é');
+    });
+  });
+
+  describe('filter function values, array nulls and query prefix (F057, F058, F059)', () => {
+    it('serializes the value a filter function returns, at every depth (F057)', () => {
+      expect(stringify({ a: 1, b: 2 }, { filter: (k, v) => (k === 'a' ? (v as number) * 10 : v) })).toBe('a=10&b=2');
+      expect(stringify({ name: 'x', password: 'secret' }, { filter: (k, v) => (k === 'password' ? '[hidden]' : v) })).toBe('name=x&password=%5Bhidden%5D');
+      expect(stringify({ o: { a: 1 } }, { filter: (k, v) => (k === 'o[a]' ? 'z' : v) })).toBe('o[a]=z');
+      expect(stringify({ a: 1 }, { filter: (k, v) => (k === 'a' ? { x: { y: 2 } } : v) })).toBe('a[x][y]=2');
+      expect(stringify({ a: 1, b: 2 }, { skipNulls: true, filter: (k, v) => (k === 'a' ? null : v) })).toBe('b=2');
+      expect(stringify({ a: 1, b: 2 }, { filter: (k, v) => (k === 'b' ? undefined : v) })).toBe('a=1');
+      const seen: Array<[string, unknown]> = [];
+      stringify({ a: { b: 1 } }, { filter: (k, v) => { seen.push([k, v]); return v; } });
+      expect(seen).toEqual([['', { a: { b: 1 } }], ['a', { b: 1 }], ['a[b]', 1]]);
+    });
+
+    it('applies skipNulls and strictNullHandling to array elements (F058)', () => {
+      expect(stringify({ a: [1, null, 2] }, { skipNulls: true })).toBe('a=1&a=2');
+      expect(stringify({ a: [1, undefined, 2] }, { skipNulls: true, arrayFormat: 'brackets' })).toBe('a[]=1&a[]=2');
+      expect(stringify({ a: [1, null, 2] }, { skipNulls: true, arrayFormat: 'comma' })).toBe('a=1,2');
+      expect(stringify({ a: [null, undefined] }, { skipNulls: true })).toBe('');
+      expect(stringify({ a: [1, null] }, { strictNullHandling: true })).toBe('a=1&a');
+      expect(stringify({ a: [1, null, 2] }, { arrayFormat: 'indices', strictNullHandling: true })).toBe('a[0]=1&a[1]&a[2]=2');
+      expect(stringify({ a: [null, 'x'] }, { arrayFormat: 'brackets', strictNullHandling: true })).toBe('a[]&a[]=x');
+      expect(stringify({ a: [1, null] }, { skipNulls: true, strictNullHandling: true })).toBe('a=1');
+      expect(parse(stringify({ a: [1, null] }, { strictNullHandling: true }), { strictNullHandling: true })).toEqual({ a: ['1', null] });
+      expect(stringify({ a: [1, null, 2] })).toBe('a=1&a=&a=2');
+    });
+
+    it('does not prefix an empty query and keeps stringifyUrl to a single ? (F059)', () => {
+      expect(stringify({}, { addQueryPrefix: true })).toBe('');
+      expect(stringify({ a: null }, { addQueryPrefix: true, skipNulls: true })).toBe('');
+      expect(stringify({ a: 1 }, { addQueryPrefix: true })).toBe('?a=1');
+      expect(stringifyUrl('http://x.com/p', { a: 1 }, { addQueryPrefix: true })).toBe('http://x.com/p?a=1');
+      expect(stringifyUrl('http://x.com/p', {}, { addQueryPrefix: true })).toBe('http://x.com/p');
+      expect(stringifyUrl('http://x.com/p?z=1#f', { a: 1 }, { addQueryPrefix: true })).toBe('http://x.com/p?z=1&a=1#f');
+    });
+  });
+
+  describe('BigInt and circular values inside arrays (F070)', () => {
+    it('serializes bigint and skips circular references in JSON-encoded array elements', () => {
+      expect(stringify({ a: [{ id: 10n }] }, { encode: false })).toBe('a={"id":"10"}');
+      expect(stringify({ a: [[10n]] }, { encode: false })).toBe('a=["10"]');
+      expect(stringify({ a: [10n, 1] }, { arrayFormat: 'json', encode: false })).toBe('a=["10",1]');
+      expect(stringify({ a: [{ id: 10n }] })).toBe('a=%7B%22id%22%3A%2210%22%7D');
+      const loop: unknown[] = [];
+      loop.push(loop);
+      expect(stringify({ k: loop }, { encode: false })).toBe('k=[null]');
+      const self: Record<string, unknown> = { x: 1 };
+      self.self = self;
+      expect(stringify({ k: [self] }, { encode: false })).toBe('k={"x":1}');
+      const shared = { v: 1 };
+      expect(stringify({ k: [{ a: shared, b: shared }] }, { encode: false })).toBe('k={"a":{"v":1},"b":{"v":1}}');
     });
   });
 });

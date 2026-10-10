@@ -112,7 +112,9 @@ export type SchemaType =
   | EnumSchema<any>
   | UnionSchema<any>
   | OptionalSchema<any>
-  | NullableSchema<any>;
+  | NullableSchema<any>
+  // [F053] literal(), any(), unknown(), null() and every transform() result are plain BaseSchemas.
+  | BaseSchema<unknown>;
 
 export interface BaseSchema<T = unknown> {
   type: string;

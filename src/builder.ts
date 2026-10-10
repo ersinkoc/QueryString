@@ -1,7 +1,7 @@
 import { QueryBuilderOptions, ParsedQuery, StringifyOptions, QueryValue, Primitive } from './types';
 import { stringify, stringifyUrl } from './stringifier';
 import { parse, parseUrl } from './parser';
-import { hasOwn, isObject, merge, setOwn } from './utils/object';
+import { hasOwn, isObject, merge, setOwn, withOptions } from './utils/object';
 
 // [F035] Faithful deep copy (JSON round trips turn Dates into strings and drop undefined / NaN).
 function cloneValue(value: unknown, seen: WeakMap<object, unknown> = new WeakMap()): unknown {
@@ -50,23 +50,24 @@ export class QueryBuilder<Shape extends object = ParsedQuery> {
     if (typeof input === 'string') {
       builder.query = { ...builder.query, ...parse(input, options) };
     } else if (input instanceof QueryBuilder) {
-      builder.query = { ...input.query };
-      builder.options = { ...input.options, ...options };
+      builder.query = cloneValue(input.query) as ParsedQuery;
+      builder.options = withOptions(input.options, options);
     } else if (isObject(input)) {
-      builder.query = { ...builder.query, ...input };
+      builder.query = { ...builder.query, ...(cloneValue(input) as ParsedQuery) };
     }
     
     return builder;
   }
 
+  // [F069] The builder owns its data: values handed in are copied, so later changes by the caller (or by a sibling builder) cannot leak in.
   add(key: string, value: unknown): this {
-    setOwn(this.query, key, value as QueryValue);
+    setOwn(this.query, key, cloneValue(value) as QueryValue);
     return this;
   }
 
   addMultiple(obj: Record<string, unknown>): this {
     for (const key of Object.keys(obj)) {
-      setOwn(this.query, key, obj[key]);
+      setOwn(this.query, key, cloneValue(obj[key]));
     }
     return this;
   }
@@ -75,7 +76,7 @@ export class QueryBuilder<Shape extends object = ParsedQuery> {
     if (!Array.isArray(values)) {
       throw new TypeError('Values must be an array');
     }
-    setOwn(this.query, key, values as Primitive[]);
+    setOwn(this.query, key, cloneValue(values) as Primitive[]);
     return this;
   }
 
@@ -83,20 +84,21 @@ export class QueryBuilder<Shape extends object = ParsedQuery> {
     if (!isObject(obj)) {
       throw new TypeError('Value must be an object');
     }
-    setOwn(this.query, key, obj as { [key: string]: QueryValue });
+    setOwn(this.query, key, cloneValue(obj) as { [key: string]: QueryValue });
     return this;
   }
 
   append(key: string, value: unknown): this {
     const existing = hasOwn(this.query, key) ? this.query[key] : undefined;
+    const copied = cloneValue(value);
     
     if (existing === undefined) {
-      setOwn(this.query, key, value as QueryValue);
+      setOwn(this.query, key, copied as QueryValue);
     } else if (Array.isArray(existing)) {
       // [F017] Copy instead of push: the array may be shared with the caller or another builder.
-      setOwn(this.query, key, [...existing, value as Primitive]);
+      setOwn(this.query, key, [...existing, copied as Primitive]);
     } else {
-      setOwn(this.query, key, [existing as Primitive, value as Primitive]);
+      setOwn(this.query, key, [existing as Primitive, copied as Primitive]);
     }
     
     return this;
@@ -171,9 +173,9 @@ export class QueryBuilder<Shape extends object = ParsedQuery> {
     if (typeof other === 'string') {
       otherQuery = parse(other, this.options);
     } else if (other instanceof QueryBuilder) {
-      otherQuery = other.query;
+      otherQuery = cloneValue(other.query) as ParsedQuery;
     } else {
-      otherQuery = other;
+      otherQuery = cloneValue(other) as ParsedQuery;
     }
     
     this.query = merge(this.query, otherQuery) as ParsedQuery;
@@ -202,11 +204,12 @@ export class QueryBuilder<Shape extends object = ParsedQuery> {
   }
 
   toObject(): Shape {
-    return { ...this.query } as unknown as Shape;
+    // [F069] A snapshot: editing the result must not edit the builder.
+    return cloneValue(this.query) as unknown as Shape;
   }
 
   toString(options?: StringifyOptions): string {
-    return stringify(this.query, { ...this.options, ...options });
+    return stringify(this.query, withOptions(this.options, options));
   }
 
   toUrl(url?: string, options?: StringifyOptions): string {
@@ -217,7 +220,7 @@ export class QueryBuilder<Shape extends object = ParsedQuery> {
       throw new Error('No base URL provided');
     }
     
-    return stringifyUrl(baseUrl, this.query, { ...this.options, ...options });
+    return stringifyUrl(baseUrl, this.query, withOptions(this.options, options));
   }
 
   build(options?: StringifyOptions): string {
@@ -254,7 +257,12 @@ export class QueryBuilder<Shape extends object = ParsedQuery> {
   }
 
   transform(transformer: (query: ParsedQuery) => ParsedQuery): this {
-    this.query = transformer(this.query);
+    // [F073] Work on a snapshot and keep a snapshot of the result: no aliasing, no half-applied edits, no non-object query.
+    const result = transformer(cloneValue(this.query) as ParsedQuery) as unknown;
+    if (typeof result !== 'object' || result === null || Array.isArray(result)) {
+      throw new TypeError('transform() must return a query object');
+    }
+    this.query = cloneValue(result) as ParsedQuery;
     return this;
   }
 
@@ -305,7 +313,7 @@ export class QueryBuilder<Shape extends object = ParsedQuery> {
   static create(query?: ParsedQuery, options?: QueryBuilderOptions): QueryBuilder {
     const builder = new QueryBuilder(options);
     if (query) {
-      builder.query = { ...builder.query, ...query };
+      builder.query = { ...builder.query, ...(cloneValue(query) as ParsedQuery) };
     }
     return builder;
   }

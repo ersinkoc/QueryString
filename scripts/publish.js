@@ -135,6 +135,9 @@ async function publish() {
   }
 }
 
+// [F060] Strict semver (major.minor.patch with optional pre-release / build metadata).
+const SEMVER = /^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+
 // Version bump helper
 async function bumpVersion() {
   const packagePath = path.join(__dirname, '../package.json');
@@ -144,11 +147,19 @@ async function bumpVersion() {
   const bumpType = await question('Choose version bump:\n1. Patch (x.x.X)\n2. Minor (x.X.0)\n3. Major (X.0.0)\n4. Custom\n\nEnter choice (1-4): ');
   
   let newVersion;
-  const [major, minor, patch] = packageJson.version.split('.').map(Number);
-  
+  const current = SEMVER.exec(packageJson.version);
+  if (!current) {
+    console.log(`❌ Current version "${packageJson.version}" is not a valid semver version`);
+    process.exit(1);
+  }
+  const major = Number(current[1]);
+  const minor = Number(current[2]);
+  const patch = Number(current[3]);
+
   switch (bumpType) {
     case '1':
-      newVersion = `${major}.${minor}.${patch + 1}`;
+      // Bumping a pre-release patch (1.2.3-beta.1) releases it (1.2.3), like `npm version patch`.
+      newVersion = current[4] ? `${major}.${minor}.${patch}` : `${major}.${minor}.${patch + 1}`;
       break;
     case '2':
       newVersion = `${major}.${minor + 1}.0`;
@@ -157,13 +168,18 @@ async function bumpVersion() {
       newVersion = `${major + 1}.0.0`;
       break;
     case '4':
-      newVersion = await question('Enter new version: ');
+      newVersion = (await question('Enter new version: ')).trim();
       break;
     default:
       console.log('❌ Invalid choice');
       process.exit(1);
   }
   
+  if (!SEMVER.test(newVersion)) {
+    console.log(`❌ "${newVersion}" is not a valid semver version`);
+    process.exit(1);
+  }
+
   packageJson.version = newVersion;
   fs.writeFileSync(packagePath, JSON.stringify(packageJson, null, 2) + '\n');
   console.log(`✅ Version bumped to ${newVersion}`);
@@ -177,7 +193,12 @@ async function bumpVersion() {
       const date = new Date().toISOString().split('T')[0];
       const changelogContent = fs.readFileSync(changelogPath, 'utf8');
       const newEntry = `\n## [${newVersion}] - ${date}\n\n### Changed\n- ${changes}\n`;
-      const updatedChangelog = changelogContent.replace('## [1.0.0]', newEntry + '\n## [1.0.0]');
+      // Insert above the newest existing release heading (or at the end), with the text taken literally.
+      const firstRelease = changelogContent.search(/^## \[/m);
+      const updatedChangelog =
+        firstRelease === -1
+          ? changelogContent.replace(/\s*$/, '\n') + newEntry
+          : changelogContent.slice(0, firstRelease) + newEntry.slice(1) + '\n' + changelogContent.slice(firstRelease);
       fs.writeFileSync(changelogPath, updatedChangelog);
       console.log('✅ CHANGELOG.md updated');
     }
